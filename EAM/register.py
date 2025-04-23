@@ -532,7 +532,7 @@ if __name__ == "__main__":
 
     mesh_img = mesh_to_sitk(registered_verts, triangles, la_mask, step_mm=0.05)
 
-    from graph import plot_sitk_images
+    from ElectroAnatomyCloud.EAM.graph import plot_sitk_images
     plot_sitk_images(mesh_img, la_mask)
 
     sitk.WriteImage(mesh_img, 'C:/users/steph/downloads/EAM.nii.gz')

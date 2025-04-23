@@ -281,3 +281,106 @@ def plot_meshes_3d(meshes, names=None, colors=None, opacity=0.4):
         showlegend=True
     )
     fig.show()
+
+
+def plot_voltages_3d(meshpath, xml_dir, voltage_type='Bipolar'):
+    vertices, triangles = load_mesh_data(meshpath, with_vertex_ids=True)
+    vertex_voltage = load_voltage_data_from_xml(xml_dir, meshpath)
+
+    # Extract voltage values (index 0 for unipolar, 1 for bipolar)
+    voltages = np.array([
+        vertex_voltage.get(v[0], (0, 0))[1 if voltage_type == "Bipolar" else 0]
+        for v in vertices
+    ])
+    colors = (voltages - np.min(voltages)) / (np.max(voltages) - np.min(voltages))
+
+    fig = go.Figure(
+        data=[go.Mesh3d(
+            x=vertices[:, 1],
+            y=vertices[:, 2],
+            z=vertices[:, 3],
+            i=triangles[:, 0],
+            j=triangles[:, 1],
+            k=triangles[:, 2],
+            intensity=voltages,
+            colorscale='jet',
+            showscale=True,
+            colorbar=dict(title=f"{voltage_type} Voltage (mV)"),
+            opacity=1
+        )]
+    )
+
+    fig.update_layout(
+        title=f"3D Mesh Colored by {voltage_type} Voltage",
+        scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z")
+    )
+
+    fig.show()
+
+
+def plot_voltages_3d_color_adjust(meshpath, xml_dir, voltage_type='Bipolar'):
+    vertices, triangles = load_mesh_data(meshpath, with_vertex_ids=True)
+    vertex_voltage = load_voltage_data_from_xml(xml_dir, meshpath)
+
+    # Build voltage array using vertex IDs
+    voltages_raw = []
+    for v in vertices:
+        v_id = int(v[0])
+        voltage_tuple = vertex_voltage.get(v_id, (np.nan, np.nan))
+        value = voltage_tuple[1 if voltage_type == 'Bipolar' else 0]
+        voltages_raw.append(value)
+
+    voltages = np.array(voltages_raw)
+
+    # Normalize color intensity only for 0–2 mV range
+    clip_min, clip_max = 0.0, 2.0
+    clipped = np.clip(voltages, clip_min, clip_max)
+    norm_intensity = (clipped - clip_min) / (clip_max - clip_min)
+
+    # Create a masked array for color application
+    nan_mask = np.isnan(voltages)
+
+    # Custom color scale emphasizing detail in 0–2 mV
+    colorscale = [
+        [0.00, "rgb(169,169,169)"],     # Gray for missing
+        [0.001, "rgb(0, 0, 255)"],      # Blue at 0 mV
+        [0.25,  "rgb(0, 255, 255)"],    # Cyan
+        [0.5,   "rgb(0, 255, 0)"],      # Green
+        [0.75,  "rgb(255, 255, 0)"],    # Yellow
+        [1.0,   "rgb(255, 0, 0)"],      # Red at 2 mV
+    ]
+
+    # Fill in NaNs with gray voltage so colorbar remains consistent
+    voltages_filled = voltages.copy()
+    voltages_filled[nan_mask] = -1  # Put gray below visible range
+
+    fig = go.Figure(
+        data=[
+            go.Mesh3d(
+                x=vertices[:, 1],
+                y=vertices[:, 2],
+                z=vertices[:, 3],
+                i=triangles[:, 0],
+                j=triangles[:, 1],
+                k=triangles[:, 2],
+                intensity=voltages_filled,
+                colorscale=colorscale,
+                showscale=True,
+                cmin=0,
+                cmax=2,
+                colorbar=dict(title=f"{voltage_type} Voltage (mV)"),
+                opacity=1
+            )
+        ]
+    )
+
+    fig.update_layout(
+        title=f"3D Mesh Colored by {voltage_type} Voltage (Detail 0–2 mV)",
+        scene=dict(
+            xaxis_title="X",
+            yaxis_title="Y",
+            zaxis_title="Z",
+        )
+    )
+
+    fig.show()
