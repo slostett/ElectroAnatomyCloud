@@ -1,0 +1,21 @@
+[project]
+name = "ElectroAnatomyCloud"
+version = "0.1.0"
+description = "Tools for processing and visualizing electroanatomic cardiac mesh data"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "SimpleITK",
+    "scikit-learn",
+    "scipy",
+    "trimesh",
+    "matplotlib",
+    "plotly",
+    "scikit-image",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "build"]
+build-backend = "setuptools.build_meta"
