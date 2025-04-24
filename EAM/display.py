@@ -17,9 +17,14 @@ class PointCloud:
         self.vertices = np.array(vertices)
         self.labels = labels
 
+    def get_vertices(self):
+        return self.vertices
+
+    def get_labels(self):
+        return self.labels
+
     def plot(self):
         plot_shell_point_cloud(self.vertices)
-
 
     def cluster_points_kmeans(self, n_clusters=3):
         """
@@ -343,6 +348,12 @@ if __name__ == '__main__':
     mesh.plot(voltage_type='Unipolar')
     mesh.apply_euler_transform((90,0,0))
     mesh.plot(voltage_type='Unipolar')
+
+    la_test_image = sitk.ReadImage(meshpath_2)
+    from register import sitk_binary_shell
+    test_shell = sitk_binary_shell(la_test_image)
+    test_shell = PointCloud(test_shell)
+    test_shell.plot()
 
     #plot_3d()
     from register import sitk_binary_shell

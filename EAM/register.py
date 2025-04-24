@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as R
 from trimesh.registration import icp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from graph import *
+from display import PointCloud
 
 
 def load_mesh_data(meshpath, with_vertex_ids=True):
@@ -94,12 +95,17 @@ def register_mesh_icp(fixed, moving):
     Perform Iterative Closest Point (ICP) alignment of two point clouds.
 
     Args:
-        fixed (np.ndarray): Target point cloud.
-        moving (np.ndarray): Point cloud to align.
+        fixed (PointCloud): Target point cloud.
+        moving (PointCloud): Point cloud to align.
 
     Returns:
         tuple: (transformation matrix, transformed points, final cost)
     """
+    if type(fixed) == PointCloud:
+        fixed = fixed.get_vertices()
+    if type(moving) == PointCloud:
+        moving = moving.get_vertices()
+
     matrix, transformed, cost = icp(
         moving,
         fixed,
@@ -138,6 +144,12 @@ def get_long_axis(points: np.ndarray):
 
 
 def prealign(vertices, image_vertices):
+
+    if type(vertices) == PointCloud:
+        vertices = vertices.get_vertices()
+    if type(vertices) == PointCloud:
+        vertices = vertices.get_vertices()
+
     com = np.mean(vertices, axis=0)
 
     def find_rotation_matrix(pc_direction, target_direction):
@@ -193,36 +205,25 @@ def prealign(vertices, image_vertices):
 
 
 def sitk_binary_shell(sitk_image):
-    """
-    Extracts the shell (boundary) point cloud from a binary SimpleITK image.
-    A voxel is part of the shell if it has at least one neighbor that is 0.
+    from scipy.ndimage import convolve
+    import numpy as np
 
-    Args:
-        sitk_image (sitk.Image): Binary 3D SimpleITK image (foreground = 1, background = 0).
-
-    Returns:
-        numpy.ndarray: Nx3 array of 3D physical coordinates of shell points.
-    """
-    # Convert image to NumPy array (z, y, x)
     binary_array = sitk.GetArrayFromImage(sitk_image).astype(np.uint8)
 
-    # Define 3D 6-connectivity kernel (only faces)
+    # 6-connectivity kernel
     kernel = np.zeros((3, 3, 3), dtype=int)
     kernel[1, 1, 0] = kernel[1, 1, 2] = 1
     kernel[1, 0, 1] = kernel[1, 2, 1] = 1
     kernel[0, 1, 1] = kernel[2, 1, 1] = 1
 
-    # Count neighboring background (0) voxels for each voxel
     neighbor_zero_count = convolve(binary_array == 0, kernel, mode='constant', cval=0)
-
-    # Shell = 1 where voxel is 1 and has at least one neighbor that is 0
     shell_mask = (binary_array == 1) & (neighbor_zero_count > 0)
 
-    # Get voxel indices (z, y, x) and convert to (x, y, z)
+    # Get voxel indices (z, y, x) → reorder to (x, y, z)
     indices = np.argwhere(shell_mask)
-    indices = indices[:, ::-1]  # to (x, y, z)
+    indices = indices[:, [2, 1, 0]]  # ← critical fix
 
-    # Convert voxel indices to physical coordinates
+    # Physical coordinate conversion
     spacing = np.array(sitk_image.GetSpacing())
     origin = np.array(sitk_image.GetOrigin())
     direction = np.array(sitk_image.GetDirection()).reshape(3, 3)
@@ -249,6 +250,7 @@ def _icp_with_rotation(angles, moving, fixed):
         return cost, angles, matrix, aligned
     except Exception as e:
         return np.inf, angles, None, None
+
 
 def euler_search_icp(fixed, moving, angles_deg=(0, 45, 90, 135, 180, 225, 270, 315), max_workers=None):
     angle_combos = list(product(angles_deg, repeat=3))
@@ -364,6 +366,20 @@ def _evaluate_translation_shift(fixed, moving, shift_vector):
         return np.inf, shift_vector, moving
 
 def translation_gradient_descent_icp(fixed, moving, initial_shift=5.0, epsilon=1e-3, max_iter=100, max_workers=None):
+    '''
+    Tries shifting in 6 orthogonal directions and seeing if alignment improves. if it does, continue the process
+    :param fixed: PointCloud or np.array
+    :param moving: PointCloud or np.array
+    :param initial_shift: float or int, inital offset for translations
+    :param epsilon: when to stop
+    :param max_iter: max # of iterations
+    :param max_workers: max # of cpu cores to use, None means it will use all
+    :return:
+    '''
+    if type(fixed) == PointCloud:
+        fixed = fixed.get_vertices()
+    if type(moving) == PointCloud:
+        moving = moving.get_vertices()
     directions = np.array([
         [1, 0, 0], [-1, 0, 0],
         [0, 1, 0], [0, -1, 0],
@@ -506,19 +522,22 @@ if __name__ == "__main__":
 
     meshpath_2 = "C:/Users/steph/Downloads/Atrium_L.nii.gz"
 
-    plot_sitk_image_3d(meshpath_2)
-
-    '''
     # === Load mesh ===
     vertices, triangles = load_mesh_data(meshpath, with_vertex_ids=True)
 
     # === Load NIfTI and extract label ===
     la_seg_image = sitk.ReadImage(nii_path)
+    #la_test_image = sitk.ReadImage(meshpath_2)
+    #plot_sitk_image_3d(la_test_image)
+    #test_shell = sitk_binary_shell(la_test_image)
+    #test_shell = PointCloud(test_shell)
+    #test_shell.plot()
 
     la_mask = extract_label_channel(la_seg_image, label_id=2)
     #print(np.argwhere(sitk.GetArrayFromImage(la_mask) == 1))
     #print(la_mask.GetOrigin())
     la_shell = sitk_binary_shell(la_mask)
+
     vertices = prealign(vertices, la_shell)
     #print(vertices)
     #print(triangles)
@@ -526,7 +545,7 @@ if __name__ == "__main__":
     labels = cluster_points_kmeans(vertices, n_clusters=5)
     new_labels = merge_n_closest_clusters(vertices, labels, 3)
 
-    #vertices_transformed = apply_euler_transform(vertices, (135, 0, 90))
+    vertices_transformed = apply_euler_transform(vertices, (135, 0, 90))
 
     matrix, _ = register_mesh_icp(la_shell, vertices[new_labels == 0])
 
@@ -538,12 +557,10 @@ if __name__ == "__main__":
 
     mesh_img = mesh_to_sitk(registered_verts, triangles, la_mask, step_mm=0.05)
 
-    from ElectroAnatomyCloud.EAM.graph import plot_sitk_images
     plot_sitk_images(mesh_img, la_mask)
 
-    sitk.WriteImage(mesh_img, 'C:/users/steph/downloads/EAM.nii.gz')
+    #sitk.WriteImage(mesh_img, 'C:/users/steph/downloads/EAM.nii.gz')
 
 
     #meshpath = '/nas/longleaf/home/slostett/cardiacfibrosis/6-1-sinus.mesh'
     #nii_path = "/nas/longleaf/home/slostett/cardiacfibrosis/results_totalseg.nii"
-    '''

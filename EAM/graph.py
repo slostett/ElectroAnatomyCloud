@@ -126,23 +126,25 @@ def plot_sitk_image_3d(image: sitk.Image, level: float = 0.5, name: str = "Mask"
 
     Parameters:
         image (sitk.Image): The binary or labeled image to visualize.
-        level (float): The threshold level used for surface extraction (default 0.5).
+        level (float): The threshold level used for surface extraction.
         name (str): Legend label.
         color (str): Color of the mesh.
         opacity (float): Mesh opacity.
     """
-    # Convert to numpy volume
     volume = sitk.GetArrayFromImage(image)
+    spacing = image.GetSpacing()  # (x, y, z) in physical units
+    origin = image.GetOrigin()
+    direction = np.array(image.GetDirection()).reshape(3, 3)
+    from skimage.measure import marching_cubes
+    # Marching cubes returns vertices in voxel index space (z, y, x) with spacing applied
+    verts, faces, _, _ = marching_cubes(volume, level=level, spacing=spacing[::-1])  # spacing is (z, y, x)
 
-    # Convert to mesh using marching cubes
-    spacing = image.GetSpacing()[::-1]
-    origin = image.GetOrigin()[::-1]
-    mesh = trimesh.voxel.ops.matrix_to_marching_cubes(volume, pitch=spacing[0])
-    mesh.apply_translation(origin)
+    # Convert to physical coordinates: (z, y, x) → (x, y, z)
+    verts = verts[:, [2, 1, 0]]  # to (x, y, z)
+    verts = (verts @ direction.T) + origin  # apply direction and origin
 
-    # Prepare mesh for Plotly
-    x, y, z = mesh.vertices.T
-    i, j, k = mesh.faces.T
+    x, y, z = verts.T
+    i, j, k = faces.T
 
     fig = go.Figure(data=[
         go.Mesh3d(
