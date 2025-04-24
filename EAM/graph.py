@@ -300,9 +300,6 @@ def plot_voltages_3d(vertices, triangles, in_voltages, voltage_type='Bipolar'):
     ])
     colors = (voltages - np.min(voltages)) / (np.max(voltages) - np.min(voltages))
 
-    print(vertices)
-    print(voltages)
-
     fig = go.Figure(
         data=[go.Mesh3d(
             x=vertices[:, 0],
@@ -327,15 +324,13 @@ def plot_voltages_3d(vertices, triangles, in_voltages, voltage_type='Bipolar'):
     fig.show()
 
 
-def plot_voltages_3d_color_adjust(meshpath, xml_dir, voltage_type='Bipolar'):
-    vertices, triangles = load_mesh_data(meshpath, with_vertex_ids=True)
-    vertex_voltage = load_voltage_data_from_xml(xml_dir, meshpath)
+def plot_voltages_3d_color_adjust(vertices, triangles, in_voltages, voltage_type='Bipolar'):
 
     # Build voltage array using vertex IDs
     voltages_raw = []
     for v in vertices:
         v_id = int(v[0])
-        voltage_tuple = vertex_voltage.get(v_id, (np.nan, np.nan))
+        voltage_tuple = in_voltages.get(v_id, (np.nan, np.nan))
         value = voltage_tuple[1 if voltage_type == 'Bipolar' else 0]
         voltages_raw.append(value)
 
@@ -366,9 +361,9 @@ def plot_voltages_3d_color_adjust(meshpath, xml_dir, voltage_type='Bipolar'):
     fig = go.Figure(
         data=[
             go.Mesh3d(
-                x=vertices[:, 1],
-                y=vertices[:, 2],
-                z=vertices[:, 3],
+                x=vertices[:, 0],
+                y=vertices[:, 1],
+                z=vertices[:, 2],
                 i=triangles[:, 0],
                 j=triangles[:, 1],
                 k=triangles[:, 2],

@@ -16,15 +16,13 @@ class Mesh:
     def initalize_voltages(self, xml_dir):
         self.voltages = load_voltage_data_from_xml(xml_dir, self.meshpath)
 
-    def plot(self):
+    def plot(self, voltage_type='Bipolar'):
         if self.voltages is None:
             print('Plotting without voltages. If you have voltages, call .initialize_voltages first')
             plot_meshes_3d([Trimesh(vertices=self.vertices, faces=self.triangles)])
         if self.voltages is not None:
             print('Plotting with voltages.')
-            plot_voltages_3d(self.vertices, self.triangles, self.voltages, voltage_type='Bipolar')
-
-
+            plot_voltages_3d_color_adjust(self.vertices, self.triangles, self.voltages, voltage_type)
 
 
 def load_mesh_data(meshpath, with_vertex_ids=False):
@@ -133,7 +131,7 @@ if __name__ == '__main__':
 
     mesh = Mesh(meshpath_1)
     mesh.initalize_voltages(xml_folder_1)
-    mesh.plot()
+    mesh.plot(voltage_type='Unipolar')
 
     #plot_3d()
     from register import sitk_binary_shell
