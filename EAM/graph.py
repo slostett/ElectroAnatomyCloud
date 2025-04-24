@@ -258,7 +258,15 @@ def plot_sitk_images(struct1, struct2, name1="Structure 1", name2="Structure 2",
     fig.show()
 
 
-def plot_meshes_3d(meshes, names=None, colors=None, opacity=0.4):
+def plot_meshes_3d(meshes, names=None, colors=None, opacity=0.7):
+    '''
+    Plots a graph of trimesh objects passed in
+    :param meshes: List of trimesh objects
+    :param names: list of strings of names to graph
+    :param colors: list of strings to colors
+    :param opacity: self explanatory
+    :return: None
+    '''
     fig = go.Figure()
     for i, mesh in enumerate(meshes):
         name = names[i] if names else f"Mesh {i+1}"
@@ -283,22 +291,23 @@ def plot_meshes_3d(meshes, names=None, colors=None, opacity=0.4):
     fig.show()
 
 
-def plot_voltages_3d(meshpath, xml_dir, voltage_type='Bipolar'):
-    vertices, triangles = load_mesh_data(meshpath, with_vertex_ids=True)
-    vertex_voltage = load_voltage_data_from_xml(xml_dir, meshpath)
+def plot_voltages_3d(vertices, triangles, in_voltages, voltage_type='Bipolar'):
 
     # Extract voltage values (index 0 for unipolar, 1 for bipolar)
     voltages = np.array([
-        vertex_voltage.get(v[0], (0, 0))[1 if voltage_type == "Bipolar" else 0]
+        in_voltages.get(v[0], (0, 0))[1 if voltage_type == "Bipolar" else 0]
         for v in vertices
     ])
     colors = (voltages - np.min(voltages)) / (np.max(voltages) - np.min(voltages))
 
+    print(vertices)
+    print(voltages)
+
     fig = go.Figure(
         data=[go.Mesh3d(
-            x=vertices[:, 1],
-            y=vertices[:, 2],
-            z=vertices[:, 3],
+            x=vertices[:, 0],
+            y=vertices[:, 1],
+            z=vertices[:, 2],
             i=triangles[:, 0],
             j=triangles[:, 1],
             k=triangles[:, 2],

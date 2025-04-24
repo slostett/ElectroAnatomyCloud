@@ -4,6 +4,28 @@ import re
 import xml.etree.ElementTree as ET
 import os
 from pathlib import Path
+from trimesh import Trimesh
+from graph import *
+
+class Mesh:
+    def __init__(self, meshpath):
+        self.meshpath = meshpath
+        self.vertices, self.triangles = load_mesh_data(meshpath)
+        self.voltages = None
+
+    def initalize_voltages(self, xml_dir):
+        self.voltages = load_voltage_data_from_xml(xml_dir, self.meshpath)
+
+    def plot(self):
+        if self.voltages is None:
+            print('Plotting without voltages. If you have voltages, call .initialize_voltages first')
+            plot_meshes_3d([Trimesh(vertices=self.vertices, faces=self.triangles)])
+        if self.voltages is not None:
+            print('Plotting with voltages.')
+            plot_voltages_3d(self.vertices, self.triangles, self.voltages, voltage_type='Bipolar')
+
+
+
 
 def load_mesh_data(meshpath, with_vertex_ids=False):
     '''
@@ -106,16 +128,21 @@ if __name__ == '__main__':
     meshpath_1 = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_19_56/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-1-sinus.mesh'
     xml_folder_1 = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_10_53/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/'
     meshpath_2 = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_10_53/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-LA fam.mesh'
-    xml_folder_2 = 'C:/users/steph/Documents/UNC Cardiac Imaging/ExportData28_02_25 16_10_53/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/'
+    xml_folder_2 = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_10_53/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/'
+    meshpath_3 = "C:/Users/steph/Downloads/Atrium_L.nii.gz"
 
-
+    mesh = Mesh(meshpath_1)
+    mesh.initalize_voltages(xml_folder_1)
+    mesh.plot()
 
     #plot_3d()
-    vertices, triangles = load_mesh_data(meshpath_1, True)
-    from graph import plot_voltages_3d
-    plot_voltages_3d(meshpath_1, xml_folder_1, "Bipolar")
-    sitk_image_1 = mesh_to_sitk(vertices, triangles)
-    vertices, triangles = load_mesh_data(meshpath_2, True)
-    sitk_image_2 = mesh_to_sitk(vertices, triangles)
+    from register import sitk_binary_shell
+    #vertices, triangles = load_mesh_data(meshpath_3, True)
+
+
+    #plot_voltages_3d(vertices, np.array([]), meshpath_2, xml_folder_1, "Bipolar")
+    #sitk_image_1 = mesh_to_sitk(vertices, triangles)
+    #vertices, triangles = load_mesh_data(meshpath_2, True)
+    #sitk_image_2 = mesh_to_sitk(vertices, triangles)
     #show_multiple_sitk_images_3d([sitk_image_1, sitk_image_2], colors=['red', 'blue'])
     #plot_voltages_3d_color_adjust(meshpath, xml_folder, 'Bipolar')

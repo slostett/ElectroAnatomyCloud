@@ -7,6 +7,7 @@ from itertools import product
 from scipy.spatial.transform import Rotation as R
 from trimesh.registration import icp
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from graph import *
 
 
 def load_mesh_data(meshpath, with_vertex_ids=True):
@@ -503,6 +504,11 @@ if __name__ == "__main__":
     meshpath = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_19_56/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-1-sinus.mesh'
     nii_path = "C:/Users/steph/Downloads/Sorted_0_6_channel0.nii"
 
+    meshpath_2 = "C:/Users/steph/Downloads/Atrium_L.nii.gz"
+
+    plot_sitk_image_3d(meshpath_2)
+
+    '''
     # === Load mesh ===
     vertices, triangles = load_mesh_data(meshpath, with_vertex_ids=True)
 
@@ -540,3 +546,4 @@ if __name__ == "__main__":
 
     #meshpath = '/nas/longleaf/home/slostett/cardiacfibrosis/6-1-sinus.mesh'
     #nii_path = "/nas/longleaf/home/slostett/cardiacfibrosis/results_totalseg.nii"
+    '''
