@@ -1,5 +1,4 @@
 import numpy as np
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import re
 import xml.etree.ElementTree as ET
 import os
@@ -8,6 +7,9 @@ from trimesh import Trimesh
 from graph import *
 import SimpleITK as sitk
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from scipy.spatial.transform import Rotation as R
+
 
 
 class PointCloud:
@@ -86,6 +88,74 @@ class PointCloud:
         self.labels = new_labels
         return new_labels
 
+    def apply_transform(self, matrix: np.ndarray) -> np.ndarray:
+        """
+        Apply a 4x4 transformation matrix to an Nx3 array of points.
+        """
+        assert matrix.shape == (4, 4), "Expected 4x4 homogeneous matrix"
+
+        # Convert points to homogeneous coordinates: Nx3 → Nx4
+        ones = np.ones((self.vertices.shape[0], 1))
+        points_homogeneous = np.hstack([self.vertices, ones])  # Nx4
+
+        # Apply transformation
+        transformed = points_homogeneous @ matrix.T  # Apply transform
+
+        self.vertices = transformed[:, :3]  # Return only XYZ
+        return self.vertices
+
+    def apply_euler_transform(self, angles_deg: tuple, center: np.ndarray = None) -> np.ndarray:
+        """
+        Applies an Euler rotation about the center of a point cloud, preserving location.
+
+        Args:
+            points (np.ndarray): (N, 3) point cloud.
+            angles_deg (tuple): Euler angles (X, Y, Z) in degrees.
+            center (np.ndarray or None): Optional (3,) array to rotate about. Defaults to centroid.
+
+        Returns:
+            np.ndarray: Rotated point cloud with preserved position.
+        """
+        if center is None:
+            center = self.vertices.mean(axis=0)
+
+        # Translate to origin
+        shifted = self.vertices - center
+
+        # Apply rotation
+        rot_matrix = R.from_euler('xyz', angles_deg, degrees=True).as_matrix()
+        rotated = shifted @ rot_matrix.T
+
+        # Translate back
+        self.vertices = rotated + center
+        return self.vertices
+
+    def get_long_axis(self):
+        """
+        Finds the long axis of a 3D point cloud using PCA.
+
+        Parameters:
+        - points: (N, 3) numpy array of 3D coordinates.
+
+        Returns:
+        - center: The centroid of the point cloud (3,)
+        - direction: Unit vector along the long axis (3,)
+        """
+        assert self.vertices.ndim == 2 and self.vertices.shape[1] == 3, "Input must be (N, 3) array"
+
+        # Center the data
+        center = self.vertices.mean(axis=0)
+        centered_points = self.vertices - center
+
+        # PCA
+        pca = PCA(n_components=3)
+        pca.fit(centered_points)
+
+        # First principal component = long axis direction
+        direction = pca.components_[0]
+
+        return direction
+
 
 
 class Mesh(PointCloud):
@@ -117,7 +187,6 @@ class Mesh(PointCloud):
         if self.voltages is not None:
             print('Plotting with voltages.')
             plot_voltages_3d_color_adjust(self.vertices, self.triangles, self.voltages, voltage_type)
-
 
     def mesh_to_sitk(self, sitk_reference_image, step_mm=0.05):
         """
@@ -160,6 +229,7 @@ class Mesh(PointCloud):
         print(f"Set {count} voxels to 1 from {len(self.triangles)} triangles.")
 
         return image
+
 
 
 
@@ -270,6 +340,8 @@ if __name__ == '__main__':
 
     mesh = Mesh(meshpath_1)
     mesh.initalize_voltages(xml_folder_1)
+    mesh.plot(voltage_type='Unipolar')
+    mesh.apply_euler_transform((90,0,0))
     mesh.plot(voltage_type='Unipolar')
 
     #plot_3d()
