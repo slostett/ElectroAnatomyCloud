@@ -145,11 +145,6 @@ def get_long_axis(points: np.ndarray):
 
 def prealign(vertices, image_vertices):
 
-    if type(vertices) == PointCloud:
-        vertices = vertices.get_vertices()
-    if type(vertices) == PointCloud:
-        vertices = vertices.get_vertices()
-
     com = np.mean(vertices, axis=0)
 
     def find_rotation_matrix(pc_direction, target_direction):
@@ -221,7 +216,7 @@ def sitk_binary_shell(sitk_image):
 
     # Get voxel indices (z, y, x) → reorder to (x, y, z)
     indices = np.argwhere(shell_mask)
-    indices = indices[:, [2, 1, 0]]  # ← critical fix
+    indices = indices[:, [2, 1, 0]]
 
     # Physical coordinate conversion
     spacing = np.array(sitk_image.GetSpacing())
@@ -536,7 +531,7 @@ if __name__ == "__main__":
     la_mask = extract_label_channel(la_seg_image, label_id=2)
     #print(np.argwhere(sitk.GetArrayFromImage(la_mask) == 1))
     #print(la_mask.GetOrigin())
-    la_shell = sitk_binary_shell(la_mask)
+    la_shell = PointCloud(la_mask)
 
     vertices = prealign(vertices, la_shell)
     #print(vertices)

@@ -11,11 +11,13 @@ from sklearn.decomposition import PCA
 from scipy.spatial.transform import Rotation as R
 
 
-
 class PointCloud:
     def __init__(self, vertices, labels=None):
-        self.vertices = np.array(vertices)
-        self.labels = labels
+        if type(vertices) == sitk.Image:
+            self.vertices = self.sitk_binary_shell(vertices)
+        else:
+            self.vertices = np.array(vertices)
+            self.labels = labels
 
     def get_vertices(self):
         return self.vertices
@@ -25,6 +27,35 @@ class PointCloud:
 
     def plot(self):
         plot_shell_point_cloud(self.vertices)
+
+    @staticmethod
+    def sitk_binary_shell(sitk_image):
+        from scipy.ndimage import convolve
+        import numpy as np
+
+        binary_array = sitk.GetArrayFromImage(sitk_image).astype(np.uint8)
+
+        # 6-connectivity kernel
+        kernel = np.zeros((3, 3, 3), dtype=int)
+        kernel[1, 1, 0] = kernel[1, 1, 2] = 1
+        kernel[1, 0, 1] = kernel[1, 2, 1] = 1
+        kernel[0, 1, 1] = kernel[2, 1, 1] = 1
+
+        neighbor_zero_count = convolve(binary_array == 0, kernel, mode='constant', cval=0)
+        shell_mask = (binary_array == 1) & (neighbor_zero_count > 0)
+
+        # Get voxel indices (z, y, x) → reorder to (x, y, z)
+        indices = np.argwhere(shell_mask)
+        indices = indices[:, [2, 1, 0]]
+
+        # Physical coordinate conversion
+        spacing = np.array(sitk_image.GetSpacing())
+        origin = np.array(sitk_image.GetOrigin())
+        direction = np.array(sitk_image.GetDirection()).reshape(3, 3)
+
+        physical_coords = (indices * spacing) @ direction.T + origin
+
+        return physical_coords
 
     def cluster_points_kmeans(self, n_clusters=3):
         """
@@ -40,7 +71,7 @@ class PointCloud:
 
         kmeans = KMeans(n_clusters=n_clusters, n_init='auto', random_state=42)
         labels = kmeans.fit_predict(self.vertices)
-        return labels
+        self.labels=labels
 
     def merge_n_closest_clusters(self, n_merge: int = 3):
         """
@@ -161,6 +192,64 @@ class PointCloud:
 
         return direction
 
+    def prealign(self, other):
+        '''
+        Transforms the vertices of this PointCloud or Mesh to be close to those of the other.
+        Note that self will move, other is fixed.
+        :param other: PointCloud, Mesh, fixed.
+        :return: None, self.vertices will be updated.
+        '''
+
+        com = np.mean(self.vertices, axis=0)
+
+        def find_rotation_matrix(pc_direction, target_direction):
+            """
+            Rotates and translates a 3D point cloud so that its long axis aligns with the target direction.
+
+            Parameters:
+            - points: (N, 3) numpy array of 3D points
+            - pc_center: center of point cloud (3,)
+            - pc_direction: long axis of point cloud (3,)
+            - target_center: center of target (e.g. image) (3,)
+            - target_direction: long axis of target (3,)
+
+            Returns:
+            - aligned_points: transformed point cloud (N, 3)
+            """
+
+            # Normalize directions
+            pc_dir = pc_direction / np.linalg.norm(pc_direction)
+            tgt_dir = target_direction / np.linalg.norm(target_direction)
+
+            # Step 1: Compute rotation from pc_dir -> tgt_dir
+            v = np.cross(pc_dir, tgt_dir)
+            c = np.dot(pc_dir, tgt_dir)
+            if np.allclose(v, 0):  # already aligned or anti-aligned
+                if c > 0:
+                    R_mat = np.eye(3)
+                else:  # 180-degree rotation
+                    # Find arbitrary orthogonal axis
+                    axis = np.eye(3)[np.argmin(np.abs(pc_dir))]
+                    v = np.cross(pc_dir, axis)
+                    R_mat = R.from_rotvec(np.pi * v / np.linalg.norm(v)).as_matrix()
+            else:
+                skew = np.array([
+                    [0, -v[2], v[1]],
+                    [v[2], 0, -v[0]],
+                    [-v[1], v[0], 0]
+                ])
+                R_mat = np.eye(3) + skew + (skew @ skew) * ((1 - c) / (np.linalg.norm(v) ** 2))
+
+                return R_mat
+
+        image_com = np.mean(other.vertices, axis=0)
+
+        direction = self.get_long_axis()
+        image_direction = other.get_long_axis()
+        r_mat = find_rotation_matrix(direction, image_direction)
+
+        rotated_vertices = (self.vertices - com) @ r_mat.T
+        self.vertices = rotated_vertices + image_com
 
 
 class Mesh(PointCloud):
@@ -181,8 +270,7 @@ class Mesh(PointCloud):
             self.vertices, self.triangles = np.array(vertices), np.array(triangles)
         self.voltages = None
 
-
-    def initalize_voltages(self, xml_dir):
+    def initialize_voltages(self, xml_dir):
         self.voltages = load_voltage_data_from_xml(xml_dir, self.meshpath)
 
     def plot(self, voltage_type='Bipolar'):
@@ -350,10 +438,10 @@ if __name__ == '__main__':
     mesh.plot(voltage_type='Unipolar')
 
     la_test_image = sitk.ReadImage(meshpath_2)
-    from register import sitk_binary_shell
-    test_shell = sitk_binary_shell(la_test_image)
-    test_shell = PointCloud(test_shell)
-    test_shell.plot()
+    # plot_sitk_image_3d(la_test_image)
+    # test_shell = sitk_binary_shell(la_test_image)
+    # test_shell = PointCloud(test_shell)
+    # test_shell.plot()
 
     #plot_3d()
     from register import sitk_binary_shell
