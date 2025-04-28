@@ -25,11 +25,13 @@ py align_mesh.py `
 
 Euler transform is the rotation which gives the lowest prealignment score. This can be brute forced using --compute_euler_transform as an argument, but it will take awhile. Once you've computed this once, you can save the transform and reapply it next time without manually computing using --euler_transform and passing in the tuple in quotations as above.
 
-Example Usage:
+Example Usage of Imported Package:
 ```
+from display import Mesh
+
 my_mesh = Mesh(meshpath="path/to/mesh.mesh")  # need meshpath= or the class will assume you are passing in raw points.
 my_mesh.initialize_voltages("path/to/folder/with/xml")  # the code will attempt to find the xml voltages with the same name as your mesh.
 mesh.plot()
 ```
 
-As of now, the files are only available directly here. I'm currently working on getting the package available via pip and useable via command line.
+As of now, the files are only available directly here. I'm currently working on getting the package available via pip.
