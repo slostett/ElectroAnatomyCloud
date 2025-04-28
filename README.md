@@ -11,6 +11,20 @@ PointCloud
 
 I can't post any of the EAMs or alignment data here since it's PHI. The data above is from an open source CT I segmented using totalsegmentator. If anyone has open source EAM data, let me know and I will process and add it here.
 
+Example Usage of the CLI (recommended for simple use cases):
+```
+py align_mesh.py `
+ --meshpath "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_19_56/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-1-sinus.mesh" `
+ --segpath "C:/Users/steph/Downloads/Sorted_0_6_channel0.nii" `
+ --output_path "C:/users/steph/Documents/UNC Cardiac Imaging/results/EAM.nii.gz" `
+ --segchannel 2 `
+ --euler_transform "(0, 0, 0)" `
+ --kmeans_alignment `
+ --plot
+```
+
+Euler transform is the rotation which gives the lowest prealignment score. This can be brute forced using --compute_euler_transform as an argument, but it will take awhile. Once you've computed this once, you can save the transform and reapply it next time without manually computing using --euler_transform and passing in the tuple in quotations as above.
+
 Example Usage:
 ```
 my_mesh = Mesh(meshpath="path/to/mesh.mesh")  # need meshpath= or the class will assume you are passing in raw points.
