@@ -17,7 +17,8 @@ class PointCloud:
             self.vertices = self.sitk_binary_shell(vertices)
         else:
             self.vertices = np.array(vertices)
-            self.labels = labels
+
+        self.labels = labels
 
     def get_vertices(self):
         return self.vertices
@@ -177,11 +178,15 @@ class PointCloud:
         - center: The centroid of the point cloud (3,)
         - direction: Unit vector along the long axis (3,)
         """
-        assert self.vertices.ndim == 2 and self.vertices.shape[1] == 3, "Input must be (N, 3) array"
+        if len(np.unique(self.labels)) > 1:
+            vertices = self.vertices[self.labels == 0]
+        else:
+            vertices = self.get_vertices()
+        assert vertices.ndim == 2 and vertices.shape[1] == 3, "Input must be (N, 3) array"
 
         # Center the data
-        center = self.vertices.mean(axis=0)
-        centered_points = self.vertices - center
+        center = vertices.mean(axis=0)
+        centered_points = vertices - center
 
         # PCA
         pca = PCA(n_components=3)

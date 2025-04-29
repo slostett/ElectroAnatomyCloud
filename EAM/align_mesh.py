@@ -1,7 +1,6 @@
 import argparse
 import ast
 import sys
-import SimpleITK as sitk
 from display import *
 from register import *
 from graph import *
@@ -38,11 +37,11 @@ def main():
     la_mask = extract_label_channel(la_seg_image, label_id=args.segchannel)
     la_shell = PointCloud(la_mask)
 
-    my_mesh.prealign(la_shell)
-
     if args.kmeans_alignment:
         my_mesh.cluster_points_kmeans(5)
         my_mesh.merge_n_closest_clusters(3)
+
+    my_mesh.prealign(la_shell)
 
     if args.compute_euler_transform:
         vertices_aligned, transform, angles = euler_search_icp(fixed=la_shell.get_vertices(), moving=my_mesh.get_vertices())
