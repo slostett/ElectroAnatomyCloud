@@ -296,8 +296,9 @@ def plot_meshes_3d(meshes, names=None, colors=None, opacity=0.7):
 def plot_voltages_3d(vertices, triangles, in_voltages, voltage_type='Bipolar'):
 
     # Extract voltage values (index 0 for unipolar, 1 for bipolar)
+    index = ["Unipolar", 'Bipolar', 'Impedance'].index(voltage_type)
     voltages = np.array([
-        in_voltages.get(v[0], (0, 0))[1 if voltage_type == "Bipolar" else 0]
+        in_voltages.get(v[0], (0, 0, 0))[index]
         for v in vertices
     ])
     colors = (voltages - np.min(voltages)) / (np.max(voltages) - np.min(voltages))
@@ -327,38 +328,38 @@ def plot_voltages_3d(vertices, triangles, in_voltages, voltage_type='Bipolar'):
 
 
 def plot_voltages_3d_color_adjust(vertices, triangles, in_voltages, voltage_type='Bipolar'):
-
+    def sigmoid_scale(v):
+        return 1 / (1 + np.exp(-(v - 1)))  # Centered at 1 mV
     # Build voltage array using vertex IDs
     voltages_raw = []
-    for v in vertices:
-        v_id = int(v[0])
-        voltage_tuple = in_voltages.get(v_id, (np.nan, np.nan))
-        value = voltage_tuple[1 if voltage_type == 'Bipolar' else 0]
-        voltages_raw.append(value)
+    if type(in_voltages) == np.ndarray:
+        voltages_raw = in_voltages
+    else:
+        for v in vertices:
+            v_id = int(v[0])
+            voltage_tuple = in_voltages.get(v_id, (np.nan, np.nan))
+            value = voltage_tuple[1 if voltage_type == 'Bipolar' else 0]
+            voltages_raw.append(value)
 
     voltages = np.array(voltages_raw)
-
-    # Normalize color intensity only for 0–2 mV range
-    clip_min, clip_max = 0.0, 2.0
-    clipped = np.clip(voltages, clip_min, clip_max)
-    norm_intensity = (clipped - clip_min) / (clip_max - clip_min)
-
-    # Create a masked array for color application
     nan_mask = np.isnan(voltages)
 
-    # Custom color scale emphasizing detail in 0–2 mV
-    colorscale = [
-        [0.00, "rgb(169,169,169)"],     # Gray for missing
-        [0.001, "rgb(0, 0, 255)"],      # Blue at 0 mV
-        [0.25,  "rgb(0, 255, 255)"],    # Cyan
-        [0.5,   "rgb(0, 255, 0)"],      # Green
-        [0.75,  "rgb(255, 255, 0)"],    # Yellow
-        [1.0,   "rgb(255, 0, 0)"],      # Red at 2 mV
-    ]
+    # Apply sigmoid scaling to non-NaN values
+    scaled_voltages = np.full_like(voltages, np.nan, dtype=np.float64)
+    valid_mask = ~nan_mask
+    scaled_voltages[valid_mask] = sigmoid_scale(voltages[valid_mask])
 
-    # Fill in NaNs with gray voltage so colorbar remains consistent
-    voltages_filled = voltages.copy()
-    voltages_filled[nan_mask] = -1  # Put gray below visible range
+    # Fill NaNs with a color-indicating low value
+    scaled_voltages_filled = scaled_voltages.copy()
+    scaled_voltages_filled[nan_mask] = -0.1  # outside sigmoid [0, 1] range for gray color
+
+    # Continuous colorscale using Plotly's built-in Viridis
+    colorscale = "Plasma"
+
+    # Map voltage values to tick positions using sigmoid
+    tick_voltage_values = [0, 0.5, 1, 1.5, 2, 5, 10]
+    tickvals = [sigmoid_scale(v) for v in tick_voltage_values]
+    ticktext = [str(v) for v in tick_voltage_values]
 
     fig = go.Figure(
         data=[
@@ -369,19 +370,23 @@ def plot_voltages_3d_color_adjust(vertices, triangles, in_voltages, voltage_type
                 i=triangles[:, 0],
                 j=triangles[:, 1],
                 k=triangles[:, 2],
-                intensity=voltages_filled,
+                intensity=scaled_voltages_filled,
                 colorscale=colorscale,
                 showscale=True,
                 cmin=0,
-                cmax=2,
-                colorbar=dict(title=f"{voltage_type} Voltage (mV)"),
+                cmax=1,
+                colorbar=dict(
+                    title=f"{voltage_type} Voltage (mV)",
+                    tickvals=tickvals,
+                    ticktext=ticktext
+                ),
                 opacity=1
             )
         ]
     )
 
     fig.update_layout(
-        title=f"3D Mesh Colored by {voltage_type} Voltage (Detail 0–2 mV)",
+        title=f"3D Mesh Colored by {voltage_type} Voltage (Sigmoid-scaled near 1 mV)",
         scene=dict(
             xaxis_title="X",
             yaxis_title="Y",

@@ -10,6 +10,14 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from scipy.spatial.transform import Rotation as R
 
+def find_mesh_files(root_dir):
+    files = [str(path) for path in Path(root_dir).rglob("*.mesh")]
+    if len(files) == 0:
+        print('Zero files found. Make sure you\'ve unzipped subfolders. Use 7zip if you can\'t unzip the normal way.')
+    print(f'{len(files)} mesh files found in your directory or subfolders:\n')
+    for file in files:
+        print(file)
+    return files
 
 class PointCloud:
     def __init__(self, vertices, labels=None):
@@ -266,6 +274,7 @@ class Mesh(PointCloud):
         :param triangles: iterable
         :param meshpath: string path to file if quickload
         '''
+        assert (vertices is not None and triangles is not None) or meshpath is not None, "Mesh initialized incorrectly. If you are quickloading from filename, you need meshpath="
         PointCloud.__init__(self, vertices)
         self.meshpath = meshpath
         if meshpath is not None:
@@ -275,15 +284,27 @@ class Mesh(PointCloud):
             self.vertices, self.triangles = np.array(vertices), np.array(triangles)
         self.voltages = None
 
-    def initialize_voltages(self, xml_dir):
-        self.voltages = load_voltage_data_from_xml(xml_dir, self.meshpath)
+    def get_triangles(self):
+        return self.triangles
+
+    def get_voltages(self):
+        return self.voltages
+
+    def initialize_voltages(self, voltages=None, xml_dir=None):
+        if voltages:
+            self.voltages = voltages
+        else:
+            self.voltages = load_voltage_data_from_xml(self.meshpath, xml_dir)
 
     def plot(self, voltage_type='Bipolar'):
         if self.voltages is None:
             print('Plotting without voltages. If you have voltages, call .initialize_voltages first')
             plot_meshes_3d([Trimesh(vertices=self.vertices, faces=self.triangles)])
         if self.voltages is not None:
-            print('Plotting with voltages.')
+            if voltage_type == "Impedance":
+                print(f'Plotting with {voltage_type}s. Work in progress')
+            else:
+                print(f'Plotting with {voltage_type} voltages.')
             plot_voltages_3d_color_adjust(self.vertices, self.triangles, self.voltages, voltage_type)
 
     def mesh_to_sitk(self, sitk_reference_image, step_mm=0.05):
@@ -329,25 +350,13 @@ class Mesh(PointCloud):
         return image
 
 
-
-
-
-def load_mesh_data(meshpath, with_vertex_ids=False):
-    '''
-    :param meshpath: string, where .mesh file is located
-    :param with_vertex_ids: If true, adds vertex id as first element in row.
-    :return: np arrays of vertices (with or without ids) and triangles.
-    '''
-
+def parse_biosense(lines, with_vertex_ids=False):
     vertices = []
     triangles = []
     reading_vertices = False
     reading_triangles = False
 
-    with open(meshpath, "rb") as f:
-        data = f.read().decode("ascii", errors="ignore").split('\n')
-
-    for line in data:
+    for line in lines:
         line = line.strip()
         if not line or line.startswith(";") or line.startswith("#"):
             continue
@@ -384,16 +393,70 @@ def load_mesh_data(meshpath, with_vertex_ids=False):
 
     return np.array(vertices), np.array(triangles)
 
-def load_voltage_data_from_xml(xml_dir, meshpath):
+
+def parse_st_jude_xml(filepath, with_vertex_ids=False, include_voltage=False):
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(filepath)
+    root = tree.getroot()
+
+    vertices_text = root.find(".//Vertices").text.strip()
+    vertices_raw = list(map(float, vertices_text.split()))
+    vertices = list(zip(vertices_raw[0::3], vertices_raw[1::3], vertices_raw[2::3]))
+    if with_vertex_ids:
+        vertices = [(i, x, y, z) for i, (x, y, z) in enumerate(vertices)]
+
+    polygons_text = root.find(".//Polygons").text.strip()
+    polygons_raw = list(map(int, polygons_text.split()))
+    triangles = [(i1 - 1, i2 - 1, i3 - 1) for i1, i2, i3 in
+                 zip(polygons_raw[0::3], polygons_raw[1::3], polygons_raw[2::3])]
+
+    voltages = None
+    if include_voltage:
+        map_data_tag = root.find(".//Map_data")
+        if map_data_tag is not None and map_data_tag.text:
+            voltages = np.array(list(map(float, map_data_tag.text.strip().split())))
+            if len(voltages) != len(vertices):
+                raise ValueError("Mismatch between number of voltages and vertices")
+
+    return np.array(vertices), np.array(triangles), voltages
+
+
+def load_mesh_data(meshpath, with_vertex_ids=False, format_hint=None):
+    '''
+    Loads mesh data from Biosense, St. Jude, or other known formats.
+
+    :param meshpath: Path to the mesh file (.mesh or .xml).
+    :param with_vertex_ids: Whether to return vertex IDs (if available).
+    :param format_hint: Optional override ("biosense", "st_jude").
+    :return: (vertices, triangles) as numpy arrays.
+    '''
+
+    # Determine format
+    if format_hint == "st_jude" or meshpath.endswith(".xml"):
+        return parse_st_jude_xml(meshpath)
+
+    with open(meshpath, "rb") as f:
+        lines = f.read().decode("ascii", errors="ignore").splitlines()
+
+    if format_hint == "biosense" or ("[VerticesSection]" in lines and "[TrianglesSection]" in lines):
+        return parse_biosense(lines)
+
+    raise ValueError("Could not detect mesh format. Use format_hint='biosense' or 'st_jude'.")
+
+
+def load_voltage_data_from_xml(meshpath, xml_dir=None):
     '''
     :param xml_dir: String, directory where corresponding "points_export.xml" can be found
     :param meshpath: String, where mesh file is
-    :return: dict: int -> (int, int); point id -> (unipolar voltage, bipolar voltage)
+    :return: dict: int -> (float, float, int); point id -> (unipolar voltage, bipolar voltage, impedance rate)
     '''
     voltage_map = {}
 
     # Get mesh file prefix (remove .mesh, add _Points_Export.xml)
     mesh_prefix = Path(meshpath).stem
+    if xml_dir is None:
+        xml_dir = Path(meshpath).parent
+
     points_filename = f"{mesh_prefix}_Points_Export.xml"
     points_export_file = os.path.join(xml_dir, points_filename)
 
@@ -414,28 +477,142 @@ def load_voltage_data_from_xml(xml_dir, meshpath):
         if file_name:
             point_map[point_id] = file_name
 
-    # Load voltages for each point
+    # Load voltages and impedance rate for each point
     for point_id, filename in point_map.items():
         file_path = os.path.join(xml_dir, filename)
         if os.path.exists(file_path):
             tree = ET.parse(file_path)
             root = tree.getroot()
+
             voltages = root.find(".//Voltages")
+            impedance = root.find(".//Impedances")
+
             if voltages is not None:
                 unipolar = float(voltages.attrib.get("Unipolar", 0))
                 bipolar = float(voltages.attrib.get("Bipolar", 0))
-                voltage_map[point_id] = (unipolar, bipolar)
+            else:
+                unipolar, bipolar = 0.0, 0.0
+
+            if impedance is not None:
+                rate = int(impedance.attrib.get("Rate", 0))
+            else:
+                rate = 0
+
+            voltage_map[point_id] = (unipolar, bipolar, rate)
 
     return voltage_map
 
 
-if __name__ == '__main__':
-    meshpath_1 = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_19_56/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-1-sinus.mesh'
-    xml_folder_1 = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_10_53/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/'
-    meshpath_2 = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_10_53/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-LA fam.mesh'
-    xml_folder_2 = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_10_53/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/'
-    meshpath_3 = "C:/Users/steph/Downloads/Atrium_L.nii.gz"
+def parse_st_jude_multivolume_xml(filepath, with_vertex_ids=False):
+    '''
+    Parses a St. Jude XML file with multiple Volumes.
 
+    Returns:
+        A dict: {volume_name: (vertices, triangles)}
+    '''
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(filepath)
+    root = tree.getroot()
+
+    volumes = {}
+    for volume in root.findall(".//Volume"):
+        name = volume.get("name", "UnnamedVolume")
+
+        # Parse vertices
+        vertices_text = volume.find("Vertices").text.strip()
+        vertices_raw = list(map(float, vertices_text.split()))
+        vertices = list(zip(vertices_raw[0::3], vertices_raw[1::3], vertices_raw[2::3]))
+        if with_vertex_ids:
+            vertices = [(i, x, y, z) for i, (x, y, z) in enumerate(vertices)]
+
+        # Parse triangles
+        polygons_text = volume.find("Polygons").text.strip()
+        polygons_raw = list(map(int, polygons_text.split()))
+        triangles = [(i1 - 1, i2 - 1, i3 - 1) for i1, i2, i3 in zip(polygons_raw[0::3], polygons_raw[1::3], polygons_raw[2::3])]
+
+        volumes[name] = (np.array(vertices), np.array(triangles))
+
+    return volumes
+
+
+def load_structured_mesh_with_voltage(structure_path, voltage_path):
+    from collections import defaultdict
+    import xml.etree.ElementTree as ET
+
+    # Step 1: Load flat canonical mesh from voltage file
+    vertices_all, triangles_all, voltages = parse_st_jude_xml(voltage_path, include_voltage=True)
+
+    # Step 2: Load structured geometry from the structure file
+    tree = ET.parse(structure_path)
+    root = tree.getroot()
+
+    meshes = {}
+    vertex_map = {tuple(v): i for i, v in enumerate(vertices_all)}  # for fast lookup
+
+    for volume in root.findall(".//Volume"):
+        name = volume.get("name", "UnnamedVolume")
+
+        # Parse this volume's vertices
+        vertices_text = volume.find("Vertices").text.strip()
+        v_raw = list(map(float, vertices_text.split()))
+        v_list = list(zip(v_raw[0::3], v_raw[1::3], v_raw[2::3]))
+
+        # Map to global indices (with np.allclose fallback if needed)
+        idx_map = []
+        for v in v_list:
+            i = vertex_map.get(tuple(v))
+            if i is None:
+                # fallback: slow fuzzy match
+                i = next((j for j, v_ref in enumerate(vertices_all) if np.allclose(v, v_ref, atol=1e-5)), None)
+                if i is None:
+                    raise ValueError(f"Vertex {v} not found in global vertex list.")
+            idx_map.append(i)
+
+        # Parse this volume's triangles
+        poly_text = volume.find("Polygons").text.strip()
+        poly_raw = list(map(int, poly_text.split()))
+        polys_local = list(zip(poly_raw[0::3], poly_raw[1::3], poly_raw[2::3]))
+
+        # Adjust to global indices (1-based → 0-based → remapped)
+        triangles = []
+        for t in polys_local:
+            try:
+                i1 = idx_map[t[0] - 1]
+                i2 = idx_map[t[1] - 1]
+                i3 = idx_map[t[2] - 1]
+                triangles.append((i1, i2, i3))
+            except IndexError:
+                continue  # skip malformed
+
+        vertices = [vertices_all[i] for i in set(idx_map)]
+        local_indices = {old_i: new_i for new_i, old_i in enumerate(sorted(set(idx_map)))}
+        triangles = [(local_indices[i1], local_indices[i2], local_indices[i3]) for (i1, i2, i3) in triangles]
+        voltages_local = np.array([voltages[i] for i in sorted(set(idx_map))])
+
+        m = Mesh(vertices=vertices, triangles=triangles)
+        m.voltages = voltages_local
+        meshes[name] = m
+
+    return meshes
+
+
+if __name__ == '__main__':
+    folder = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData29_04_25 13_58_54"
+    spath = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/Velocity_Export/f9f00471-2de7-46fa-a78a-f50415576216/2025_02_28_17_10_53/Model_Groups.xml"
+    vpath = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/Velocity_Export/f9f00471-2de7-46fa-a78a-f50415576216/2025_02_28_17_10_53/Contact_Mapping_Model.xml"
+
+    mesh_files = find_mesh_files(folder)
+    file = mesh_files[3]
+    mesh = Mesh(meshpath=file)
+    mesh.initialize_voltages()
+    mesh.plot()
+
+    #structures = load_structured_mesh_with_voltage(spath, vpath)
+    #left = structures['Left']
+    #left.plot()
+
+
+    '''
     mesh = Mesh(meshpath_1)
     mesh.initalize_voltages(xml_folder_1)
     mesh.plot(voltage_type='Unipolar')
@@ -459,3 +636,4 @@ if __name__ == '__main__':
     #sitk_image_2 = mesh_to_sitk(vertices, triangles)
     #show_multiple_sitk_images_3d([sitk_image_1, sitk_image_2], colors=['red', 'blue'])
     #plot_voltages_3d_color_adjust(meshpath, xml_folder, 'Bipolar')
+    '''
