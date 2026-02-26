@@ -1,0 +1,26 @@
+# ElectroAnatomyCloud — pinned dependencies for Docker build
+# Generated from the development environment (Python 3.10, Windows).
+#
+# Notes:
+#   - open3d requires libgomp1 on Linux (installed in Dockerfile).
+#   - SimpleITK is case-insensitive on PyPI; listed as SimpleITK here.
+#   - dash 4.x requires Flask 3.x (pulled in automatically).
+
+dash==4.0.0
+dash-bootstrap-components==2.0.4
+diskcache==5.6.3
+
+numpy==2.2.6
+scipy==1.15.3
+SimpleITK==2.5.3
+scikit-learn==1.7.2
+scikit-image==0.25.2
+trimesh==4.11.2
+plotly==6.5.2
+matplotlib==3.10.8
+tqdm==4.67.3
+
+# Point-to-plane ICP (optional but included for full feature support)
+# Use open3d-cpu on ARM/Linux if GPU is unavailable:
+#   open3d-cpu==0.18.0
+open3d==0.19.0

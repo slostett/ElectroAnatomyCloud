@@ -1,0 +1,53 @@
+# ElectroAnatomyCloud — Docker Compose configuration
+#
+# Usage
+# -----
+# 1. Copy .env.example to .env and set your local data directory paths.
+# 2. Run:  docker-compose up --build
+# 3. Open: http://localhost:8050
+#
+# Volume mounts
+# -------------
+# Host data is mounted read-only inside the container under /data/:
+#   /data/mesh    <- EAM .mesh files
+#   /data/seg     <- Segmentation .nii.gz files
+#   /data/ct      <- Raw CT .nii.gz files
+#   /data/results <- Output files (read-write)
+#
+# Inside the app UI, enter paths like:
+#   /data/mesh/patient.mesh
+#   /data/seg/label_map.nii.gz
+#   /data/ct/raw_ct.nii.gz
+#
+# Environment variables (set in .env file)
+# ----------------------------------------
+#   MESH_DIR    - host path to EAM data folder
+#   SEG_DIR     - host path to segmentation folder
+#   CT_DIR      - host path to CT folder
+#   RESULTS_DIR - host path for output files
+
+services:
+  eam-app:
+    build: .
+    image: electroanatomycloud:latest
+    container_name: eam-alignment
+    init: true
+    ports:
+      - "127.0.0.1:8050:8050"
+    volumes:
+      # Data volumes — adjust paths in .env or override here directly
+      - "${MESH_DIR:-./EAM data}:/data/mesh:ro"
+      - "${SEG_DIR:-./CT Data}:/data/seg:ro"
+      - "${CT_DIR:-./CT Data}:/data/ct:ro"
+      - "${RESULTS_DIR:-./results}:/data/results:rw"
+      # Persist the server-side diskcache between container restarts
+      - eam-cache:/app/.cache
+    environment:
+      - DATA_ROOT=/data
+      # Set to 1 to enable Dash debug mode (auto-reload, error overlay)
+      - DASH_DEBUG=${DASH_DEBUG:-0}
+    restart: unless-stopped
+
+volumes:
+  eam-cache:
+    driver: local

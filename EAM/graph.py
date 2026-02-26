@@ -4,7 +4,6 @@ import trimesh
 import SimpleITK as sitk
 import plotly.graph_objects as go
 
-
 def plot_clusters_plotly(points: np.ndarray, labels: np.ndarray):
     """
     Plot 3D clustered point cloud using Plotly for interactive visualization.
@@ -165,56 +164,63 @@ def plot_sitk_image_3d(image: sitk.Image, level: float = 0.5, name: str = "Mask"
     fig.show()
 
 
-def show_multiple_sitk_images_3d(images, labels=None, colors=None, spacing_override=None, opacity=0.4):
-    """
-    Display multiple sitk.Image volumes as overlaid 3D surfaces using plotly.
-
-    Args:
-        images (list): List of SimpleITK images.
-        labels (list): Optional list of labels for the plot legend.
-        colors (list): Optional list of colors (e.g., ['red', 'blue']).
-        spacing_override (float): If specified, overrides pitch for marching cubes.
-        opacity (float): Opacity of each mesh.
-    """
+def show_multiple_images_3d(images, labels=None, colors=None, voltage_type='Bipolar', opacity=0.5, level=0.5):
     fig = go.Figure()
 
     for idx, image in enumerate(images):
-        label = labels[idx] if labels else f"Image {idx+1}"
+        label = labels[idx] if labels else f"Object {idx+1}"
         color = colors[idx] if colors else None
+        from display import PointCloud
+        # Handle sitk.Image
+        if isinstance(image, sitk.Image):
+            array = sitk.GetArrayFromImage(image)  # (z, y, x)
+            spacing = image.GetSpacing()
+            origin = image.GetOrigin()
+            direction = np.array(image.GetDirection()).reshape(3, 3)
 
-        # Convert image to numpy
-        volume = sitk.GetArrayFromImage(image)  # (z, y, x)
-        spacing = image.GetSpacing()[::-1] if spacing_override is None else (spacing_override,) * 3
-        origin = image.GetOrigin()[::-1]
+            verts, faces, _, _ = measure.marching_cubes(array, level=level, spacing=spacing)
+            verts = (verts @ direction.T) + origin
 
-        # Generate mesh with marching cubes via trimesh
-        mesh = trimesh.voxel.ops.matrix_to_marching_cubes(volume, pitch=spacing[0])
-        mesh.apply_translation(origin)
+            fig.add_trace(go.Mesh3d(
+                x=verts[:, 0], y=verts[:, 1], z=verts[:, 2],
+                i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+                name=label, opacity=opacity, color=color, flatshading=True
+            ))
 
-        verts = mesh.vertices
-        faces = mesh.faces
+        # Handle Mesh-like object
+        elif hasattr(image, "get_vertices") and hasattr(image, "get_triangles"):
+            vertices, triangles = image.get_vertices(), image.get_triangles()
 
-        fig.add_trace(go.Mesh3d(
-            x=verts[:, 0],
-            y=verts[:, 1],
-            z=verts[:, 2],
-            i=faces[:, 0],
-            j=faces[:, 1],
-            k=faces[:, 2],
-            name=label,
-            opacity=opacity,
-            color=color,
-            flatshading=True
-        ))
+            voltages = None
+            if hasattr(image, "voltages") and image.voltages is not None:
+                index = ["Unipolar", 'Bipolar', 'Impedance'].index(voltage_type)
+                voltages = [x[index] for x in image.voltages.values()]
+
+            fig.add_trace(go.Mesh3d(
+                x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
+                i=triangles[:, 0], j=triangles[:, 1], k=triangles[:, 2],
+                intensity=voltages if voltages else None,
+                colorscale='jet' if voltages else None,
+                showscale=bool(voltages),
+                colorbar=dict(title=f"{voltage_type} Voltage (mV)") if voltages else None,
+                opacity=opacity,
+                name=label
+            ))
+
+        # Handle PointCloud
+
+        elif isinstance(image, PointCloud):
+            vertices = image.vertices
+            fig.add_trace(go.Scatter3d(
+                x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
+                mode='markers',
+                marker=dict(size=3, color=color if color else 'black'),
+                name=label
+            ))
 
     fig.update_layout(
-        title="3D Overlay of Multiple Volumes",
-        scene=dict(
-            xaxis_title='X',
-            yaxis_title='Y',
-            zaxis_title='Z',
-            aspectmode='data'
-        ),
+        title="3D Visualization of Images, Meshes, and Point Clouds",
+        scene=dict(xaxis_title="X", yaxis_title="Y", zaxis_title="Z", aspectmode='data'),
         showlegend=True
     )
 
@@ -297,11 +303,7 @@ def plot_voltages_3d(vertices, triangles, in_voltages, voltage_type='Bipolar'):
 
     # Extract voltage values (index 0 for unipolar, 1 for bipolar)
     index = ["Unipolar", 'Bipolar', 'Impedance'].index(voltage_type)
-    voltages = np.array([
-        in_voltages.get(v[0], (0, 0, 0))[index]
-        for v in vertices
-    ])
-    colors = (voltages - np.min(voltages)) / (np.max(voltages) - np.min(voltages))
+    voltages = [x[index] for x in in_voltages.values()]
 
     fig = go.Figure(
         data=[go.Mesh3d(
@@ -330,18 +332,8 @@ def plot_voltages_3d(vertices, triangles, in_voltages, voltage_type='Bipolar'):
 def plot_voltages_3d_color_adjust(vertices, triangles, in_voltages, voltage_type='Bipolar'):
     def sigmoid_scale(v):
         return 1 / (1 + np.exp(-(v - 1)))  # Centered at 1 mV
-    # Build voltage array using vertex IDs
-    voltages_raw = []
-    if type(in_voltages) == np.ndarray:
-        voltages_raw = in_voltages
-    else:
-        for v in vertices:
-            v_id = int(v[0])
-            voltage_tuple = in_voltages.get(v_id, (np.nan, np.nan))
-            value = voltage_tuple[1 if voltage_type == 'Bipolar' else 0]
-            voltages_raw.append(value)
-
-    voltages = np.array(voltages_raw)
+    index = ["Unipolar", 'Bipolar', 'Impedance'].index(voltage_type)
+    voltages = np.array([x[index] for x in in_voltages.values()])
     nan_mask = np.isnan(voltages)
 
     # Apply sigmoid scaling to non-NaN values
@@ -352,9 +344,6 @@ def plot_voltages_3d_color_adjust(vertices, triangles, in_voltages, voltage_type
     # Fill NaNs with a color-indicating low value
     scaled_voltages_filled = scaled_voltages.copy()
     scaled_voltages_filled[nan_mask] = -0.1  # outside sigmoid [0, 1] range for gray color
-
-    # Continuous colorscale using Plotly's built-in Viridis
-    colorscale = "Plasma"
 
     # Map voltage values to tick positions using sigmoid
     tick_voltage_values = [0, 0.5, 1, 1.5, 2, 5, 10]
@@ -371,7 +360,7 @@ def plot_voltages_3d_color_adjust(vertices, triangles, in_voltages, voltage_type
                 j=triangles[:, 1],
                 k=triangles[:, 2],
                 intensity=scaled_voltages_filled,
-                colorscale=colorscale,
+                colorscale="jet",
                 showscale=True,
                 cmin=0,
                 cmax=1,

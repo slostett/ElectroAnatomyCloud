@@ -1,14 +1,15 @@
+from graph import *
 import numpy as np
 import re
 import xml.etree.ElementTree as ET
 import os
 from pathlib import Path
 from trimesh import Trimesh
-from graph import *
 import SimpleITK as sitk
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from scipy.spatial.transform import Rotation as R
+from trimesh.registration import icp
 
 def find_mesh_files(root_dir):
     files = [str(path) for path in Path(root_dir).rglob("*.mesh")]
@@ -35,6 +36,7 @@ class PointCloud:
         return self.labels
 
     def plot(self):
+        from graph import plot_shell_point_cloud
         plot_shell_point_cloud(self.vertices)
 
     @staticmethod
@@ -205,15 +207,13 @@ class PointCloud:
 
         return direction
 
-    def prealign(self, other):
+    def prealign(self, other, k_means=True):
         '''
         Transforms the vertices of this PointCloud or Mesh to be close to those of the other.
         Note that self will move, other is fixed.
         :param other: PointCloud, Mesh, fixed.
         :return: None, self.vertices will be updated.
         '''
-
-        com = np.mean(self.vertices, axis=0)
 
         def find_rotation_matrix(pc_direction, target_direction):
             """
@@ -234,7 +234,7 @@ class PointCloud:
             pc_dir = pc_direction / np.linalg.norm(pc_direction)
             tgt_dir = target_direction / np.linalg.norm(target_direction)
 
-            # Step 1: Compute rotation from pc_dir -> tgt_dir
+            # Compute rotation from pc_dir -> tgt_dir
             v = np.cross(pc_dir, tgt_dir)
             c = np.dot(pc_dir, tgt_dir)
             if np.allclose(v, 0):  # already aligned or anti-aligned
@@ -254,6 +254,12 @@ class PointCloud:
                 R_mat = np.eye(3) + skew + (skew @ skew) * ((1 - c) / (np.linalg.norm(v) ** 2))
 
                 return R_mat
+        if k_means:
+            self.cluster_points_kmeans(5)
+            self.merge_n_closest_clusters(3)
+            com = np.mean(self.vertices[self.labels == 0], axis=0)
+        else:
+            com = np.mean(self.vertices, axis=0)
 
         image_com = np.mean(other.vertices, axis=0)
 
@@ -263,6 +269,340 @@ class PointCloud:
 
         rotated_vertices = (self.vertices - com) @ r_mat.T
         self.vertices = rotated_vertices + image_com
+
+    # ── Shared helpers for the 3-stage prealign ──────────────────────────────
+    @staticmethod
+    def _pca_axis(pts):
+        """Return first principal component (unit vector) of pts (Nx3), trimming top 2% outliers."""
+        com = pts.mean(axis=0)
+        dists = np.linalg.norm(pts - com, axis=1)
+        keep = dists <= np.percentile(dists, 98)
+        trimmed = pts[keep]
+        centered = trimmed - trimmed.mean(axis=0)
+        pca = PCA(n_components=3)
+        pca.fit(centered)
+        return pca.components_[0]
+
+    @staticmethod
+    def _rodrigues(axis, theta_rad):
+        """Rodrigues rotation matrix: rotate by theta_rad about unit axis."""
+        u = axis / np.linalg.norm(axis)
+        c, s = np.cos(theta_rad), np.sin(theta_rad)
+        skew = np.array([[0, -u[2], u[1]],
+                          [u[2], 0, -u[0]],
+                          [-u[1], u[0], 0]])
+        return c * np.eye(3) + s * skew + (1 - c) * np.outer(u, u)
+
+    @staticmethod
+    def _sym_cost(pts_a, pts_b):
+        """Symmetric mean nearest-neighbour distance (mm) between two point clouds."""
+        from scipy.spatial import KDTree
+        tree_b = KDTree(pts_b)
+        tree_a = KDTree(pts_a)
+        d_ab, _ = tree_b.query(pts_a)
+        d_ba, _ = tree_a.query(pts_b)
+        return (d_ab.mean() + d_ba.mean()) / 2.0
+
+    @staticmethod
+    def _rotate_about_axis(pts, axis, theta_rad, center):
+        """Rotate pts about an axis passing through center by theta_rad radians."""
+        R_mat = PointCloud._rodrigues(axis, theta_rad)
+        return (pts - center) @ R_mat.T + center
+
+    def stage1_com(self, other: 'PointCloud') -> np.ndarray:
+        """
+        Stage 1 prealignment: translate mesh center-of-mass to CT shell COM.
+
+        Parameters
+        ----------
+        other : PointCloud
+            Fixed CT shell point cloud. Not modified.
+
+        Returns
+        -------
+        np.ndarray
+            Copy of self.vertices after the translation (for visualization snapshots).
+
+        Notes
+        -----
+        Modifies self.vertices in-place. Call this before stage2_pca().
+        """
+        ct_com = other.get_vertices().mean(axis=0)
+        self.vertices += (ct_com - self.vertices.mean(axis=0))
+        print(f"[Prealign] Stage 1: COM alignment complete. "
+              f"Mesh COM now at {self.vertices.mean(axis=0).round(1)}")
+        return self.vertices.copy()
+
+    def stage2_pca(self, other: 'PointCloud') -> np.ndarray:
+        """
+        Stage 2 prealignment: align mesh PCA long axis to CT long axis via Rodrigues rotation.
+        Includes automatic 180-degree flip disambiguation using symmetric KDTree distance.
+
+        Parameters
+        ----------
+        other : PointCloud
+            Fixed CT shell point cloud. Not modified.
+
+        Returns
+        -------
+        np.ndarray
+            Copy of self.vertices after the rotation (for visualization snapshots).
+
+        Notes
+        -----
+        Modifies self.vertices in-place. Call stage1_com() before this method.
+        """
+        ct_pts = other.get_vertices()
+        ct_com = ct_pts.mean(axis=0)
+        ct_axis = self._pca_axis(ct_pts)
+        mesh_axis = self._pca_axis(self.vertices)
+
+        # Rodrigues rotation: mesh_axis -> ct_axis
+        v = np.cross(mesh_axis, ct_axis)
+        c = np.dot(mesh_axis, ct_axis)
+        if np.allclose(v, 0):
+            if c > 0:
+                R2 = np.eye(3)
+            else:
+                perp = np.eye(3)[np.argmin(np.abs(mesh_axis))]
+                rv = np.cross(mesh_axis, perp)
+                R2 = self._rodrigues(rv / np.linalg.norm(rv), np.pi)
+        else:
+            skew = np.array([[0, -v[2], v[1]],
+                              [v[2], 0, -v[0]],
+                              [-v[1], v[0], 0]])
+            R2 = np.eye(3) + skew + skew @ skew * ((1 - c) / (np.linalg.norm(v) ** 2))
+
+        center = ct_com
+        self.vertices = (self.vertices - center) @ R2.T + center
+
+        # 180-degree flip disambiguation
+        flipped = self._rotate_about_axis(self.vertices, ct_axis, np.pi, center)
+        cost_normal = self._sym_cost(self.vertices, ct_pts)
+        cost_flipped = self._sym_cost(flipped, ct_pts)
+        if cost_flipped < cost_normal:
+            print(f"[Prealign] Stage 2: 180-deg flip applied "
+                  f"(cost {cost_normal:.3f} -> {cost_flipped:.3f})")
+            self.vertices = flipped
+        else:
+            print(f"[Prealign] Stage 2: no flip needed "
+                  f"(cost {cost_normal:.3f} vs flipped {cost_flipped:.3f})")
+        return self.vertices.copy()
+
+    def stage3_axial(self, other: 'PointCloud') -> np.ndarray:
+        """
+        Stage 3 prealignment: 1D rotation sweep about the CT long axis to minimise symmetric
+        KDTree distance. Uses a 5-degree grid (72 candidates) followed by golden-section
+        refinement within ±15 degrees of the best grid candidate.
+
+        This implicitly aligns the pulmonary vein protrusions on the mesh to their
+        corresponding positions on the CT shell.
+
+        Parameters
+        ----------
+        other : PointCloud
+            Fixed CT shell point cloud. Not modified.
+
+        Returns
+        -------
+        np.ndarray
+            Copy of self.vertices after the rotation (for visualization snapshots).
+
+        Notes
+        -----
+        Modifies self.vertices in-place. Call stage2_pca() before this method.
+        The CT long axis (not the mesh axis) is used as the rotation axis because
+        the CT shell is complete and its principal axis is more reliable.
+        """
+        from scipy.optimize import minimize_scalar
+
+        ct_pts = other.get_vertices()
+        ct_com = ct_pts.mean(axis=0)
+        ct_axis = self._pca_axis(ct_pts)
+        center = ct_com
+
+        print("[Prealign] Stage 3: Axial rotation sweep (72 x 5-deg steps)")
+        thetas = np.deg2rad(np.arange(0, 360, 5))
+        costs = np.array([
+            self._sym_cost(self._rotate_about_axis(self.vertices, ct_axis, t, center), ct_pts)
+            for t in thetas
+        ])
+        best_idx = int(np.argmin(costs))
+        best_theta = thetas[best_idx]
+        print(f"[Prealign] Stage 3: grid best at {np.rad2deg(best_theta):.1f} deg "
+              f"(cost {costs[best_idx]:.3f})")
+
+        lo = best_theta - np.deg2rad(15)
+        hi = best_theta + np.deg2rad(15)
+
+        def _cost_scalar(theta):
+            return self._sym_cost(
+                self._rotate_about_axis(self.vertices, ct_axis, theta, center), ct_pts
+            )
+
+        result = minimize_scalar(_cost_scalar, bounds=(lo, hi), method='bounded',
+                                 options={'xatol': np.deg2rad(0.1)})
+        refined_theta = result.x
+        print(f"[Prealign] Stage 3: refined to {np.rad2deg(refined_theta):.2f} deg "
+              f"(cost {result.fun:.3f})")
+
+        self.vertices = self._rotate_about_axis(self.vertices, ct_axis, refined_theta, center)
+        return self.vertices.copy()
+
+    def structured_prealign(self, other: 'PointCloud') -> None:
+        """
+        3-stage geometric prealignment of self (EAM mesh) to other (CT shell).
+        Self is moved; other is fixed. Updates self.vertices in-place.
+
+        Delegates to the three individual stage methods for modularity:
+          - stage1_com()   : center-of-mass translation
+          - stage2_pca()   : long-axis alignment (Rodrigues + 180-deg disambiguation)
+          - stage3_axial() : 1D rotation sweep about CT long axis
+
+        Parameters
+        ----------
+        other : PointCloud
+            Fixed CT shell. Not modified.
+
+        Notes
+        -----
+        To visualize intermediate states (e.g. in a step-by-step UI), call the
+        stage methods individually rather than this combined method.
+        """
+        self.stage1_com(other)
+        self.stage2_pca(other)
+        self.stage3_axial(other)
+        print("[Prealign] Done.")
+
+    def register_mesh_icp_p2plane(self, other, iterations=50, normal_radius=5.0, max_correspondence=10.0):
+        """
+        Point-to-plane ICP using Open3D. Converges faster and more accurately than point-to-point
+        for smooth anatomical surfaces (atrium wall). Normals are estimated from the surface geometry.
+
+        Args:
+            other (PointCloud): Fixed CT shell point cloud.
+            iterations (int): Max ICP iterations (50 is typically sufficient for P2P-plane).
+            normal_radius (float): Radius in mm for normal estimation neighbourhood.
+            max_correspondence (float): Max correspondence distance in mm.
+
+        Returns:
+            tuple: (4x4 transform matrix as np.ndarray, final symmetric_mean_dist_mm)
+        """
+        import open3d as o3d
+        from scipy.spatial import KDTree
+
+        def _to_o3d(pts):
+            pc = o3d.geometry.PointCloud()
+            pc.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+            return pc
+
+        moving_pts = self.get_vertices()
+        fixed_pts = other.get_vertices()
+
+        # Voxel-downsample the CT shell to roughly match mesh density
+        if len(fixed_pts) > 2 * len(moving_pts):
+            target_n = int(1.5 * len(moving_pts))
+            pts_range = fixed_pts.max(axis=0) - fixed_pts.min(axis=0)
+            voxel_size = pts_range.max() / (target_n ** (1/3)) * 0.5
+            o3d_fixed_full = _to_o3d(fixed_pts)
+            o3d_fixed_ds = o3d_fixed_full.voxel_down_sample(voxel_size=voxel_size)
+            fixed_pts_icp = np.asarray(o3d_fixed_ds.points)
+            print(f"[P2Plane ICP] CT shell downsampled: {len(fixed_pts)} -> {len(fixed_pts_icp)} points")
+        else:
+            fixed_pts_icp = fixed_pts
+
+        o3d_moving = _to_o3d(moving_pts)
+        o3d_fixed = _to_o3d(fixed_pts_icp)
+
+        # Estimate normals (required for point-to-plane)
+        search_param = o3d.geometry.KDTreeSearchParamRadius(radius=normal_radius)
+        o3d_moving.estimate_normals(search_param=search_param)
+        o3d_fixed.estimate_normals(search_param=search_param)
+
+        # Orient normals consistently inward (for a closed LA surface, orient away from COM)
+        o3d_moving.orient_normals_towards_camera_location(
+            camera_location=np.asarray(o3d_moving.points).mean(axis=0)
+        )
+        o3d_fixed.orient_normals_towards_camera_location(
+            camera_location=np.asarray(o3d_fixed.points).mean(axis=0)
+        )
+
+        result = o3d.pipelines.registration.registration_icp(
+            source=o3d_moving,
+            target=o3d_fixed,
+            max_correspondence_distance=max_correspondence,
+            init=np.eye(4),
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            criteria=o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=iterations)
+        )
+
+        matrix = np.array(result.transformation)
+        self.apply_transform(matrix)
+
+        # Report symmetric cost on full CT shell
+        tree_ct = KDTree(other.get_vertices())
+        tree_mesh = KDTree(self.get_vertices())
+        d_m2c, _ = tree_ct.query(self.get_vertices())
+        d_c2m, _ = tree_mesh.query(other.get_vertices())
+        sym_cost = (d_m2c.mean() + d_c2m.mean()) / 2.0
+        print(f"[P2Plane ICP] Done. Fitness={result.fitness:.4f}, RMSE={result.inlier_rmse:.4f}, "
+              f"sym_mean={sym_cost:.3f} mm")
+        return matrix, sym_cost
+
+    def register_mesh_icp(self, other, iterations=100, focus_outer_fraction=None, plot=False):
+        """
+        Perform Iterative Closest Point (ICP) alignment of two point clouds.
+
+        Args:
+            self (PointCloud): moving point cloud.
+            other (PointCloud): fixed point cloud.
+            iterations (int): Maximum number of ICP iterations.
+            focus_outer_fraction (float or None): If set (e.g., 0.5), keeps only points further than this fraction
+                                                  of the max distance from the center of mass to emphasize outer structure.
+
+        Returns:
+            tuple: (transformation matrix, transformed points, final cost)
+        """
+
+        def filter_outer_points(points, fraction):
+            com = np.mean(points, axis=0)
+            dists = np.linalg.norm(points - com, axis=1)
+            max_dist = np.max(dists)
+            mask = dists >= (fraction * max_dist)
+            return points[mask]
+
+        moving = self.get_vertices()
+        fixed = other.get_vertices()
+
+        # Apply outer shell filtering if specified
+        if focus_outer_fraction is not None:
+            moving = filter_outer_points(moving, focus_outer_fraction)
+            fixed = filter_outer_points(fixed, focus_outer_fraction)
+
+
+        # Balance point count
+        if len(moving) > len(fixed):
+            moving = moving[np.random.choice(len(moving), size=len(fixed), replace=False)]
+        elif len(fixed) > len(moving):
+            fixed = fixed[np.random.choice(len(fixed), size=len(moving), replace=False)]
+
+        from graph import show_multiple_images_3d
+        from display import PointCloud
+        if focus_outer_fraction and plot:
+            show_multiple_images_3d([PointCloud(moving), PointCloud(fixed)], colors=['red', 'blue'])
+
+        print(f"Filtered moving points: {len(moving)}, fixed points: {len(fixed)}")
+
+        matrix, transformed, cost = icp(
+            moving,
+            fixed,
+            scale=False,
+            reflection=False,
+            max_iterations=iterations
+        )
+        print("PointCloud aligned to target with cost:", cost)
+        self.apply_transform(matrix)
+        return matrix, transformed, cost
 
 
 class Mesh(PointCloud):
@@ -294,7 +634,39 @@ class Mesh(PointCloud):
         if voltages:
             self.voltages = voltages
         else:
-            self.voltages = load_voltage_data_from_xml(self.meshpath, xml_dir)
+            #self.voltages = load_voltage_data_from_xml(self.meshpath, xml_dir)
+            self.voltages = load_voltage_colors_from_mesh(self.meshpath)
+
+    def remove_unused_vertices(self):
+        """
+        Remove vertices not referenced by any triangle and update triangle indices accordingly.
+
+        Parameters:
+            vertices (list of tuples): List of (x, y, z) coordinates.
+            triangles (list of tuples): List of (i1, i2, i3) index triples referencing the vertices.
+
+        Returns:
+            new_vertices (list of tuples): Filtered list of used vertices.
+            new_triangles (list of tuples): Updated triangle indices.
+        """
+        # Step 1: Find all used vertex indices
+        vertices = self.vertices
+        triangles = self.triangles
+        # Step 1: Get unique indices used in triangles
+        used_indices = np.unique(triangles)
+
+        # Step 2: Create a mapping from old to new indices
+        index_map = -np.ones(vertices.shape[0], dtype=int)
+        index_map[used_indices] = np.arange(len(used_indices))
+
+        # Step 3: Apply mapping to triangles
+        new_triangles = index_map[triangles]
+
+        # Step 4: Filter the vertices
+        new_vertices = vertices[used_indices]
+
+        self.vertices, self.triangles = new_vertices, new_triangles
+
 
     def plot(self, voltage_type='Bipolar'):
         if self.voltages is None:
@@ -305,6 +677,7 @@ class Mesh(PointCloud):
                 print(f'Plotting with {voltage_type}s. Work in progress')
             else:
                 print(f'Plotting with {voltage_type} voltages.')
+            from graph import plot_voltages_3d_color_adjust
             plot_voltages_3d_color_adjust(self.vertices, self.triangles, self.voltages, voltage_type)
 
     def mesh_to_sitk(self, sitk_reference_image, step_mm=0.05):
@@ -342,7 +715,9 @@ class Mesh(PointCloud):
                     if all(0 <= i < s for i, s in zip(idx, size)):
                         image[idx] = 1
                         count += 1
-                except RuntimeError:
+                except RuntimeError as e:
+                    print("Transform failed for point:", pt)
+                    print("Error:", e)
                     continue
 
         print(f"Set {count} voxels to 1 from {len(self.triangles)} triangles.")
@@ -596,23 +971,99 @@ def load_structured_mesh_with_voltage(structure_path, voltage_path):
     return meshes
 
 
-if __name__ == '__main__':
-    folder = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData29_04_25 13_58_54"
-    spath = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/Velocity_Export/f9f00471-2de7-46fa-a78a-f50415576216/2025_02_28_17_10_53/Model_Groups.xml"
-    vpath = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/Velocity_Export/f9f00471-2de7-46fa-a78a-f50415576216/2025_02_28_17_10_53/Contact_Mapping_Model.xml"
+def load_voltage_colors_from_mesh(filepath):
+    voltages = {}
+    in_section = False
 
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+
+            if "[VerticesColorsSection]" in line:
+                in_section = True
+                continue
+
+            if in_section:
+                if not line or line.startswith(";"):
+                    continue
+                if line.startswith("[") and not "[VerticesColorsSection]" in line:
+                    break
+
+                match = re.match(r"(\d+)\s*=\s*(.*)", line)
+                if match:
+                    vertex_id = int(match.group(1))
+                    values_str = match.group(2)
+                    values = re.findall(r"[-+]?\d*\.\d+|\d+", values_str)
+                    if len(values) >= 2:
+                        unipolar = float(values[0])
+                        bipolar = float(values[1])
+                        voltages[vertex_id] = (unipolar, bipolar)
+
+    # Summary statistics
+    if voltages:
+        unipolars = [v[0] for v in voltages.values() if v[0] > -1000]
+        bipolars = [v[1] for v in voltages.values() if v[1] > -1000]
+        print(f"Loaded {len(voltages)} voltages")
+    else:
+        print("No voltages found.")
+
+    return voltages
+
+
+import matplotlib.pyplot as plt
+
+def plot_voltage_histogram(voltages, bins=50):
+    """
+    Plots histograms of unipolar and bipolar voltages.
+
+    Parameters:
+        voltages (dict): Dictionary of form {index: (unipolar, bipolar)}.
+        bins (int): Number of histogram bins (default 50).
+    """
+    if not voltages:
+        print("No voltage data to plot.")
+        return
+
+    unipolars = [v[0] for v in voltages.values()]
+    bipolars = [v[1] for v in voltages.values()]
+
+    plt.figure()
+    plt.hist(unipolars, bins=bins, alpha=0.7, label='Unipolar')
+    plt.hist(bipolars, bins=bins, alpha=0.7, label='Bipolar')
+    plt.xlabel('Voltage')
+    plt.ylabel('Frequency')
+    plt.title('Voltage Distribution Histogram')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+if __name__ == '__main__':
+    #folder = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData29_04_25 13_58_54"
+    folder = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/1L/Patient 2025_07_08/PVI/Export_PVI-08_19_2025-15-41-50"
+    spath = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/Velocity_Export/f9f00471-2de7-46fa-a78a-f50415576216/2025_02_28_17_10_53/Model_Groups.xml"
+    #vpath = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/Velocity_Export/f9f00471-2de7-46fa-a78a-f50415576216/2025_02_28_17_10_53/Contact_Mapping_Model.xml"
+    ct_volume_path = "C:/Users/steph/Downloads/results_0000403E.nii.gz"
     mesh_files = find_mesh_files(folder)
-    file = mesh_files[3]
+
+    #print(mesh_files)
+    file = mesh_files[2]
+    print(file)
     mesh = Mesh(meshpath=file)
     mesh.initialize_voltages()
+    #test_voltages = {x: (x, x) for x in mesh.voltages.keys()}
+    #mesh.voltages = test_voltages
+    #print(mesh.voltages)
+    #plot_voltage_histogram(mesh.voltages)
     mesh.plot()
-
+    #mesh.plot()
+    '''
     #structures = load_structured_mesh_with_voltage(spath, vpath)
     #left = structures['Left']
     #left.plot()
 
 
-    '''
+    
     mesh = Mesh(meshpath_1)
     mesh.initalize_voltages(xml_folder_1)
     mesh.plot(voltage_type='Unipolar')

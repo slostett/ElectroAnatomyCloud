@@ -1,0 +1,37 @@
+# Exclude large data and build artifacts from the Docker image.
+# Data is mounted at runtime via docker-compose.yml volumes instead.
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Server-side diskcache (populated at runtime)
+.cache/
+
+# IDE / editor
+.idea/
+.vscode/
+*.suo
+*.user
+
+# Git
+.git/
+.gitignore
+
+# Docs / media (not needed in container)
+*.png
+*.pdf
+*.docx
+
+# Environment file (secrets — never bake into image)
+.env
+
+# Test outputs
+results/

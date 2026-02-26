@@ -47,16 +47,24 @@ def main():
         vertices_aligned, transform, angles = euler_search_icp(fixed=la_shell.get_vertices(), moving=my_mesh.get_vertices())
         print('Applying computed euler transform:', transform)
         my_mesh.apply_transform(transform)
+        # my_mesh.register_mesh_icp(la_shell.get_vertices()) TODO implement for PC
 
     if args.euler_transform:
         print('Applying user-specified euler transform:', args.euler_transform)
         my_mesh.apply_euler_transform(args.euler_transform)
 
+    _, _, icp_cost = my_mesh.register_mesh_icp(la_shell)
+
+    metrics = compute_alignment_metrics(my_mesh.get_vertices(), la_shell.get_vertices())
+    print("\n=== Alignment Quality Report ===")
+    for k, v in metrics.items():
+        print(f"  {k}: {v:.3f}" if isinstance(v, float) else f"  {k}: {v}")
+    print("================================\n")
+
     mesh_img = my_mesh.mesh_to_sitk(la_mask)
 
-    if args.plot:
-        print('Plotting images:')
-        plot_sitk_images(mesh_img, la_mask, name1='EAM Mesh', name2='Left Atrial Segmentation')
+    print('Plotting images:')
+    plot_sitk_images(mesh_img, la_mask, name1='EAM Mesh', name2='Left Atrial Segmentation')
 
     if args.output_path:
         sitk.WriteImage(mesh_img, args.output_path)
@@ -66,14 +74,17 @@ if __name__ == "__main__":
     main()
 
 '''
-Example:
-py align_mesh.py `
- --meshpath "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_19_56/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-1-sinus.mesh" `
- --segpath "C:/Users/steph/Downloads/Sorted_0_6_channel0.nii" `
- --output_path "C:/users/steph/Documents/UNC Cardiac Imaging/results/EAM.nii.gz" `
+# Patient 1L — baseline run (prealign + ICP, no Euler search)
+# Baseline scores (2026-02-23):
+#   mean_surface_dist_mm:   ~2.6
+#   symmetric_mean_dist_mm: ~24.0
+#   rms_dist_mm:            ~3.3
+#   hausdorff_95pct_mm:     ~111
+
+python main.py `
+ --meshpath "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/1L/Patient 2025_07_08/PVI/Export_PVI-08_19_2025-15-41-50/2-LA FAM.mesh" `
+ --segpath "C:/Users/steph/Documents/UNC Cardiac Imaging/CT Data/final nii/0000403E.nii.gz" `
  --segchannel 2 `
- --euler_transform "(0, 0, 0)" `
- --kmeans_alignment `
- --plot
- 
+ --output_path "C:/Users/steph/Documents/UNC Cardiac Imaging/results/test_baseline.nii.gz" `
+ --kmeans_alignment
 '''

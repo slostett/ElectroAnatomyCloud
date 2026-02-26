@@ -1,3 +1,4 @@
+from graph import *
 import numpy as np
 import SimpleITK as sitk
 import re
@@ -7,8 +8,7 @@ from itertools import product
 from scipy.spatial.transform import Rotation as R
 from trimesh.registration import icp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from graph import *
-from display import PointCloud
+from display import PointCloud, Mesh
 
 
 def load_mesh_data(meshpath, with_vertex_ids=True):
@@ -113,7 +113,8 @@ def register_mesh_icp(fixed, moving):
         reflection=False,
         max_iterations=100
     )
-    return matrix, transformed
+    print("Structures aligned with cost:", cost)
+    return matrix, transformed, cost
 
 
 def get_long_axis(points: np.ndarray):
@@ -145,8 +146,6 @@ def get_long_axis(points: np.ndarray):
 
 def prealign(vertices, image_vertices):
 
-    com = np.mean(vertices, axis=0)
-
     def find_rotation_matrix(pc_direction, target_direction):
         """
         Rotates and translates a 3D point cloud so that its long axis aligns with the target direction.
@@ -166,7 +165,7 @@ def prealign(vertices, image_vertices):
         pc_dir = pc_direction / np.linalg.norm(pc_direction)
         tgt_dir = target_direction / np.linalg.norm(target_direction)
 
-        # Step 1: Compute rotation from pc_dir -> tgt_dir
+        # Compute rotation from pc_dir -> tgt_dir
         v = np.cross(pc_dir, tgt_dir)
         c = np.dot(pc_dir, tgt_dir)
         if np.allclose(v, 0):  # already aligned or anti-aligned
@@ -187,10 +186,13 @@ def prealign(vertices, image_vertices):
 
             return R_mat
 
+    com = np.mean(vertices, axis=0)
     image_com = np.mean(image_vertices, axis=0)
 
+    mesh.cluster_points_kmeans(n_clusters=5)
+    mesh.merge_n_closest_clusters(3)
     direction = get_long_axis(vertices)
-    image_direction = get_long_axis(image_vertices)
+    image_direction = get_long_axis(image_vertices)  #TODO
     r_mat = find_rotation_matrix(direction, image_direction)
 
     rotated_vertices = (vertices - com) @ r_mat.T
@@ -238,7 +240,7 @@ def _icp_with_rotation(angles, moving, fixed):
             fixed,
             scale=False,
             reflection=False,
-            max_iterations=100
+            max_iterations=30
         )
 
         aligned = (np.hstack([rotated, np.ones((rotated.shape[0], 1))]) @ matrix.T)[:, :3]
@@ -250,7 +252,7 @@ def _icp_with_rotation(angles, moving, fixed):
 def euler_search_icp(fixed, moving, angles_deg=(0, 45, 90, 135, 180, 225, 270, 315), max_workers=None):
     angle_combos = list(product(angles_deg, repeat=3))
     total = len(angle_combos)
-    print(f"🧠 Searching over {total} rotation combinations...")
+    print(f"Searching over {total} rotation combinations...")
 
     best_cost = np.inf
     best_result = None
@@ -263,16 +265,16 @@ def euler_search_icp(fixed, moving, angles_deg=(0, 45, 90, 135, 180, 225, 270, 3
 
         for i, future in enumerate(as_completed(futures), 1):
             cost, angles, matrix, aligned = future.result()
-            print(f"[{i}/{total}] Rotation {angles} → Cost: {cost:.4f}")
+            print(f"[{i}/{total}] Rotation {angles} -> Cost: {cost:.4f}")
 
             if cost < best_cost:
-                print(f"    ✅ New best found at {angles}")
+                print(f"    [BEST] New best found at {angles}")
                 best_cost = cost
                 best_result = (aligned, matrix, angles)
 
     if best_result:
         aligned, matrix, angles = best_result
-        print(f"\n🎯 Best ICP result at angles: {angles} with cost {best_cost:.4f}")
+        print(f"\n Best ICP result at angles: {angles} with cost {best_cost:.4f}")
         return aligned, matrix, angles
     else:
         raise RuntimeError("ICP failed on all rotations.")
@@ -419,7 +421,7 @@ def translation_gradient_descent_icp(fixed, moving, initial_shift=5.0, epsilon=1
         else:
             print(f"[{i}] No improvement (best cost: {best_cost:.4f})")
             if current_shift < 1e-3 or cost_fraction < epsilon:
-                print("🛑 Converged.")
+                print("Converged.")
                 break
             current_shift *= 0.5
 
@@ -510,52 +512,354 @@ def apply_transform(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return transformed[:, :3]  # Return only XYZ
 
 
+def region_grow_from_mask(
+    ct,
+    mask_path,
+    label_id=0,
+    exclude_label_ids=None,
+    intensity_tolerance=80,
+    smoothing_sigma=0,
+    max_distance_multiplier=None
+):
+    """
+    Region grow a CT volume using a labeled mask region as seed, with exclusion zones and distance limiting.
+    Ensures that the original label_id region is always included in the final mask.
+
+    Args:
+        ct_path (str): Path to CT image (nii.gz).
+        mask_path (str): Path to label mask (nii.gz).
+        label_id (int): Channel used as seed.
+        exclude_label_ids (int or list[int]): Channels used as exclusion barriers (growth stops at these).
+        intensity_tolerance (float): +/- allowed intensity range from seed region.
+        smoothing_sigma (float): CT smoothing sigma (in mm).
+        max_distance_multiplier (float): Limits max grow radius to this multiple of max seed distance.
+
+    Returns:
+        sitk.Image: Binary grown mask (sitk.Image, same shape as CT).
+    """
+    import numpy as np
+    import SimpleITK as sitk
+    from scipy.ndimage import center_of_mass
+
+    mask_multi = sitk.ReadImage(mask_path)
+    seed_mask = extract_label_channel(mask_multi, label_id)
+
+    # === Exclusion Zones ===
+    exclude_array = np.zeros_like(sitk.GetArrayFromImage(seed_mask), dtype=np.uint8)
+    if exclude_label_ids is not None:
+        if isinstance(exclude_label_ids, int):
+            exclude_label_ids = [exclude_label_ids]
+        for ex_id in exclude_label_ids:
+            ex_mask = sitk.GetArrayFromImage(extract_label_channel(mask_multi, ex_id))
+            exclude_array |= (ex_mask > 0).astype(np.uint8)
+
+    # Optional smoothing
+    if smoothing_sigma > 0:
+        ct = sitk.SmoothingRecursiveGaussian(ct, sigma=smoothing_sigma)
+        ct = sitk.CurvatureFlow(ct, timeStep=0.125, numberOfIterations=5)
+
+    ct_array = sitk.GetArrayFromImage(ct)
+    seed_array = sitk.GetArrayFromImage(seed_mask)
+
+    # Apply exclusion barrier
+    ct_array[exclude_array > 0] = -1e6
+
+    # Update CT
+    ct = sitk.GetImageFromArray(ct_array)
+    ct.CopyInformation(seed_mask)
+
+    # Seed indices
+    seed_indices = np.argwhere(seed_array > 0)
+    if len(seed_indices) == 0:
+        raise ValueError("No non-zero seed region found in seed mask.")
+
+    mean_intensity = np.mean(ct_array[seed_array > 0])
+
+    # Region Growing
+    rg_filter = sitk.ConnectedThresholdImageFilter()
+    rg_filter.SetLower(float(mean_intensity - intensity_tolerance))
+    rg_filter.SetUpper(float(mean_intensity + intensity_tolerance))
+    rg_filter.SetReplaceValue(1)
+
+    seed_points = [tuple(int(i) for i in reversed(idx)) for idx in seed_indices]
+    rg_filter.SetSeedList(seed_points)
+    grown_mask = rg_filter.Execute(ct)
+
+    # === Distance Constraint (Optional) ===
+    if max_distance_multiplier is not None:
+        spacing = np.array(ct.GetSpacing())[::-1]  # z, y, x
+        grown_array = sitk.GetArrayFromImage(grown_mask)
+        grown_indices = np.argwhere(grown_array > 0)
+
+        com_voxel = np.array(center_of_mass(seed_array))
+        distances = np.linalg.norm((grown_indices - com_voxel) * spacing, axis=1)
+        max_seed_distance = np.max(np.linalg.norm((seed_indices - com_voxel) * spacing, axis=1))
+
+        allowed = distances <= (max_distance_multiplier * max_seed_distance)
+        allowed_mask = np.zeros_like(grown_array, dtype=np.uint8)
+        allowed_mask[tuple(grown_indices[allowed].T)] = 1
+        grown_mask = sitk.GetImageFromArray(allowed_mask)
+        grown_mask.CopyInformation(ct)
+
+    # === Ensure original region is preserved ===
+    final_array = sitk.GetArrayFromImage(grown_mask) | (seed_array > 0).astype(np.uint8)
+    final_mask = sitk.GetImageFromArray(final_array)
+    final_mask.CopyInformation(ct)
+
+    return final_mask
+
+
+def trim_disconnected_bridges(sitk_image, n=5):
+    """
+    Trim regions in a binary mask (SimpleITK.Image) that are connected to the main region
+    by only a narrow bridge (< n contiguous voxels).
+
+    Args:
+        sitk_image (sitk.Image): Binary mask (1 = structure, 0 = background).
+        n (int): Minimum number of layer voxels required to keep growing.
+
+    Returns:
+        sitk.Image: Filtered binary mask.
+    """
+    from collections import deque
+    from scipy.ndimage import center_of_mass, label
+    from skimage.draw import disk
+    from scipy.ndimage import binary_dilation
+    arr = sitk.GetArrayFromImage(sitk_image).astype(np.uint8)
+    shape = arr.shape
+    zdim, ydim, xdim = shape
+
+    if np.sum(arr) == 0:
+        return sitk.Image(sitk_image.GetSize(), sitk.sitkUInt8)
+
+    # Compute center column and origin voxel
+    com_f = center_of_mass(arr)
+    candidates = np.argwhere(arr > 0)
+    com = tuple(candidates[np.argmin(np.linalg.norm(candidates - com_f, axis=1))])
+    com_z, com_y, com_x = com
+
+    max_radius = int(np.ceil(np.sqrt(ydim ** 2 + xdim ** 2)))
+    included = np.zeros_like(arr, dtype=bool)
+    included[:, com_y, com_x] = arr[:, com_y, com_x].astype(bool)
+
+    # Create array of radial distances from center column (only yx plane)
+    yy, xx = np.meshgrid(np.arange(ydim), np.arange(xdim), indexing='ij')
+    radial_dist = np.sqrt((yy - com_y) ** 2 + (xx - com_x) ** 2)
+    radial_dist = np.broadcast_to(radial_dist[None, :, :], arr.shape)
+
+    # Start growing in cylindrical layers
+    from tqdm import tqdm
+    for r in tqdm(range(1, max_radius), desc="Growing by radius"):
+        ring_mask = (np.floor(radial_dist) == r) & (arr > 0)
+        if not np.any(ring_mask):
+            continue
+
+        # Only consider ring voxels that touch previously included voxels
+        grow_mask = np.zeros_like(arr, dtype=bool)
+        padded = np.pad(included, 1)
+        for dz in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dz == dy == dx == 0:
+                        continue
+                    shifted = padded[1 + dz:1 + dz + zdim, 1 + dy:1 + dy + ydim, 1 + dx:1 + dx + xdim]
+                    grow_mask |= shifted
+        border_mask = ring_mask & grow_mask
+
+        coords = np.argwhere(border_mask)
+        if coords.size == 0:
+            continue
+
+        # Get bounding box
+        minz, miny, minx = coords.min(axis=0)
+        maxz, maxy, maxx = coords.max(axis=0) + 1
+
+        subvolume = border_mask[minz:maxz, miny:maxy, minx:maxx]
+        labeled_sub, num = label(subvolume, structure=np.ones((3, 3, 3)))
+
+        for comp_id in range(1, num + 1):
+            comp_mask = (labeled_sub == comp_id)
+            comp_size = np.sum(comp_mask)
+
+            if comp_size >= n:
+                included[minz:maxz, miny:maxy, minx:maxx] |= comp_mask
+
+    # Convert to sitk
+    output_image = sitk.GetImageFromArray(included.astype(np.uint8))
+    output_image.CopyInformation(sitk_image)
+    return output_image
+
+def compute_alignment_metrics(mesh_vertices: np.ndarray, ct_vertices: np.ndarray) -> dict:
+    """
+    Compute surface distance metrics between an aligned mesh and a CT shell point cloud.
+
+    Args:
+        mesh_vertices (np.ndarray): Nx3 array of aligned mesh vertex positions (mm).
+        ct_vertices (np.ndarray): Mx3 array of CT shell surface points (mm).
+
+    Returns:
+        dict: Metric name → float value. All distances are in the same units as the inputs (typically mm).
+              Keys: mean_surface_dist_mm, symmetric_mean_dist_mm, rms_dist_mm,
+                    hausdorff_dist_mm, hausdorff_95pct_mm, n_mesh_points, n_ct_points.
+    """
+    from scipy.spatial import KDTree
+
+    tree_ct = KDTree(ct_vertices)
+    tree_mesh = KDTree(mesh_vertices)
+
+    d_mesh_to_ct, _ = tree_ct.query(mesh_vertices)
+    d_ct_to_mesh, _ = tree_mesh.query(ct_vertices)
+
+    return {
+        "mean_surface_dist_mm":   float(np.mean(d_mesh_to_ct)),
+        "symmetric_mean_dist_mm": float((np.mean(d_mesh_to_ct) + np.mean(d_ct_to_mesh)) / 2),
+        "rms_dist_mm":            float(np.sqrt(np.mean(d_mesh_to_ct ** 2))),
+        "hausdorff_dist_mm":      float(max(np.max(d_mesh_to_ct), np.max(d_ct_to_mesh))),
+        "hausdorff_95pct_mm":     float(max(np.percentile(d_mesh_to_ct, 95), np.percentile(d_ct_to_mesh, 95))),
+        "n_mesh_points":          int(len(mesh_vertices)),
+        "n_ct_points":            int(len(ct_vertices)),
+    }
+
+
+def skeletonize_sitk_image(sitk_img: sitk.Image) -> sitk.Image:
+    """
+    Skeletonize a SimpleITK binary image using 3D skeletonization.
+
+    Args:
+        sitk_img (sitk.Image): Input binary image (label or mask).
+
+    Returns:
+        sitk.Image: Skeletonized binary image.
+    """
+    # Convert to NumPy (z, y, x)
+    from skimage.morphology import skeletonize
+    img_np = sitk.GetArrayFromImage(sitk_img).astype(bool)
+
+    # Skeletonize
+    skeleton_np = skeletonize(img_np)
+
+    # Convert back to sitk.Image (SimpleITK expects (x, y, z))
+    skeleton_sitk = sitk.GetImageFromArray(skeleton_np.astype(np.uint8))
+    skeleton_sitk.CopyInformation(sitk_img)
+
+    return skeleton_sitk
+
+def emphasize_periphery(pc: 'PointCloud', scale_factor=1.0, base=np.e) -> 'PointCloud':
+    """
+    Transforms a PointCloud by exaggerating points farther from the center of mass.
+
+    Each point is scaled exponentially based on its distance from the center:
+        new_point = COM + unit_vector * exp(scale_factor * distance)
+
+    Args:
+        pc (PointCloud): Original point cloud.
+        scale_factor (float): Controls how aggressively to exaggerate distances.
+        base (float): Exponential base (e.g., e or 2).
+
+    Returns:
+        PointCloud: Transformed point cloud in the exaggerated space.
+    """
+    vertices = np.array(pc.get_vertices())
+    center = np.mean(vertices, axis=0)
+
+    # Displacement vectors
+    directions = vertices - center
+    distances = np.linalg.norm(directions, axis=1)
+
+    # Avoid division by zero
+    unit_vectors = np.divide(
+        directions,
+        distances[:, np.newaxis],
+        out=np.zeros_like(directions),
+        where=distances[:, np.newaxis] != 0
+    )
+
+    # Exponentially scaled distances
+    scaled_distances = base ** (scale_factor * distances)
+
+    # New positions
+    new_vertices = center + unit_vectors * scaled_distances[:, np.newaxis]
+
+    return PointCloud(new_vertices)
+
+
 if __name__ == "__main__":
     # === User input paths ===
-    meshpath = 'C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_19_56/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-1-sinus.mesh'
-    nii_path = "C:/Users/steph/Downloads/Sorted_0_6_channel0.nii"
+    meshpath = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/1L/Patient 2025_07_08/PVI/Export_PVI-08_19_2025-15-41-50/2-LA FAM.mesh"
+    #folder = "C:/Users/steph/Documents/UNC Cardiac Imaging/EAM data/ExportData28_02_25 16_19_56/Patient 2025_02_28/AF/Export_AF-02_28_2025-16-01-43/6-1-sinus.mesh"
+    nii_path = "C:/Users/steph/Documents/UNC Cardiac Imaging/CT Data/1L_1.nii.gz"
+    ct_path = "C:/Users/steph/Documents/UNC Cardiac Imaging/CT Data/raw_nii/1L_1.3.12.2.1107.5.1.4.105354.30000025070712213494500039033.nii.gz"
 
-    meshpath_2 = "C:/Users/steph/Downloads/Atrium_L.nii.gz"
+    #meshpath_2 = "C:/Users/steph/Downloads/Atrium_L.nii.gz"
 
     # === Load mesh ===
-    vertices, triangles = load_mesh_data(meshpath, with_vertex_ids=True)
+    #vertices, triangles = load_mesh_data(folder, with_vertex_ids=True)
+    mesh = Mesh(meshpath=meshpath)
+    mesh.initialize_voltages()
 
     # === Load NIfTI and extract label ===
+
     la_seg_image = sitk.ReadImage(nii_path)
-    #la_test_image = sitk.ReadImage(meshpath_2)
-    #plot_sitk_image_3d(la_test_image)
-    #test_shell = sitk_binary_shell(la_test_image)
-    #test_shell = PointCloud(test_shell)
-    #test_shell.plot()
+    ct = sitk.ReadImage(ct_path, sitk.sitkFloat32)
+    '''
+    smoothed = sitk.CurvatureAnisotropicDiffusion(
+        ct,
+        timeStep=.0075,
+        conductanceParameter=50,
+        numberOfIterations=50
+    )
+    sitk.WriteImage(smoothed, 'C:/users/steph/downloads/smoothed.nii.gz')
+    '''
+    smoothed = sitk.ReadImage('C:/Users/steph/Documents/UNC Cardiac Imaging/CT Data/smoothed/smoothed.nii.gz', sitk.sitkFloat32)
 
     la_mask = extract_label_channel(la_seg_image, label_id=2)
-    #print(np.argwhere(sitk.GetArrayFromImage(la_mask) == 1))
-    #print(la_mask.GetOrigin())
-    la_shell = PointCloud(la_mask)
 
-    vertices = prealign(vertices, la_shell)
+    grown_cache = 'C:/Users/steph/Documents/UNC Cardiac Imaging/results/1L_grown_trimmed_1p5.nii.gz'
+    import os
+    if os.path.exists(grown_cache):
+        print('Loading cached grown mask...')
+        la_mask_grown = sitk.ReadImage(grown_cache)
+    else:
+        print('Growing image')
+        la_mask_grown = region_grow_from_mask(smoothed, nii_path, intensity_tolerance=200, label_id=2, exclude_label_ids=[1, 3, 4, 5, 6], max_distance_multiplier=1.5)
+        print('Trimming')
+        la_mask_grown = trim_disconnected_bridges(la_mask_grown, 1000)
+        sitk.WriteImage(la_mask_grown, grown_cache)
+        print(f'Saved grown mask to cache: {grown_cache}')
+
+    la_shell = PointCloud(la_mask)
+    print(len(la_shell.vertices))
+    la_shell = PointCloud(la_mask_grown)
+    print(len(la_shell.vertices))
+
     #print(vertices)
     #print(triangles)
 
-    labels = cluster_points_kmeans(vertices, n_clusters=5)
-    new_labels = merge_n_closest_clusters(vertices, labels, 3)
+    print('Prealigning (structured 3-stage)')
+    mesh.structured_prealign(la_shell)
 
-    vertices_transformed = apply_euler_transform(vertices, (135, 0, 90))
+    print('Final ICP refinement')
+    mesh.register_mesh_icp(la_shell, iterations=100)
 
-    matrix, _ = register_mesh_icp(la_shell, vertices[new_labels == 0])
-
-    registered_verts = apply_transform(vertices, matrix)
 
     #vertices_aligned, transform, angles = euler_search_icp(fixed=la_shell, moving=vertices)
 
     #registered_verts, _, _ = translation_gradient_descent_icp(la_shell, vertices_transformed, initial_shift=10.0)
 
-    mesh_img = mesh_to_sitk(registered_verts, triangles, la_mask, step_mm=0.05)
+    metrics = compute_alignment_metrics(mesh.get_vertices(), la_shell.get_vertices())
+    print("\n=== Alignment Quality Report ===")
+    for k, v in metrics.items():
+        print(f"  {k}: {v:.3f}" if isinstance(v, float) else f"  {k}: {v}")
+    print("================================\n")
 
-    plot_sitk_images(mesh_img, la_mask)
+    print('Converting back to SITK')
+    print(len(mesh.get_vertices()))
+    mesh_img = mesh.mesh_to_sitk(la_mask_grown, step_mm=0.05)
 
-    #sitk.WriteImage(mesh_img, 'C:/users/steph/downloads/EAM.nii.gz')
+    plot_sitk_images(mesh_img, la_mask_grown)
+    #show_multiple_images_3d([mesh, la_mask])
 
+    sitk.WriteImage(mesh_img, 'C:/users/steph/downloads/EAM.nii.gz')
 
     #meshpath = '/nas/longleaf/home/slostett/cardiacfibrosis/6-1-sinus.mesh'
     #nii_path = "/nas/longleaf/home/slostett/cardiacfibrosis/results_totalseg.nii"
