@@ -53,7 +53,7 @@ Alignment of electro-anatomical mapping (EAM) data from the Biosense Webster CAR
 - [Docker Compose](https://docs.docker.com/compose/) (included with Docker Desktop)
 - Patient data on your local filesystem:
   - EAM `.mesh` files exported from CARTO
-  - Segmentation `.nii.gz` label maps (e.g., from TotalSegmentator `heartchambers_highres`)
+  - Segmentation `.nii.gz` label maps (e.g., from TotalSegmentator `heartchambers_highres`. This will most likely need to be done using a research computing cluster and is **out of scope** for this application and repo!)
   - Raw CT `.nii.gz` volumes
 
 ---
@@ -210,6 +210,16 @@ Requires Python 3.10+ with the following packages: numpy, scipy, SimpleITK, scik
 ## Pipeline Overview
 
 The alignment pipeline executes in six steps. Each stage can be independently enabled or disabled in the UI sidebar.
+
+## Intuition (KEY!)
+
+The intuition behind the algorithm is as follows:
+
+1. Grow the CT extracted region to a size and shape that resembles the EAM. TotalSegmentator does not include pulmonary vein segmentation, so these regions must be added to via region growing. Other segmented structures prevent growth into non-PV structures.
+2. Move EAM to CT center of mass. EAM must move to CT (not vice-versa) to preserve location in CT at the end.
+3. Align long axis via PCA. Now, we've got the structures aligned, save for rotation. They're on the same line. We try flipping both ways, because in theory we could have a 180 degree mismatch.
+4. Rotate until we get a decent match.
+5. Improve slightly via 1 of 2 iterative closest point (ICP) algorithms.
 
 ### Step 1 — Region Growing
 
